@@ -414,6 +414,37 @@ describe("InMemoryClineTaskSessionService", () => {
 		expect(service.listMessages("task-1").map((message) => message.content)).toEqual(["Investigate startup"]);
 	});
 
+	it("replaces an active cline session when a process stage handoff requests a fresh run", async () => {
+		const { service, runtime } = createTrackedService();
+
+		await service.startTaskSession({
+			taskId: "task-1",
+			cwd: "/tmp/worktree",
+			prompt: "Stage one",
+		});
+		await waitForTaskSessionId(runtime, "task-1");
+
+		const replacementSummary = await service.startTaskSession({
+			taskId: "task-1",
+			cwd: "/tmp/worktree",
+			prompt: "Stage two",
+			replaceActive: true,
+		});
+
+		expect(replacementSummary.state).toBe("running");
+		expect(runtime.stopTaskSessionMock).toHaveBeenCalledWith("task-1");
+		await vi.waitFor(() => {
+			expect(runtime.startTaskSessionMock).toHaveBeenCalledTimes(2);
+		});
+		expect(runtime.startTaskSessionMock).toHaveBeenLastCalledWith(
+			expect.objectContaining({
+				taskId: "task-1",
+				prompt: "resolved:Stage two",
+			}),
+		);
+		expect(service.listMessages("task-1").map((message) => message.content)).toEqual(["Stage two"]);
+	});
+
 	it("disposes cached runtime setups when the service shuts down", async () => {
 		const runtime = createFakeClineSessionRuntime();
 		const runtimeSetup = createFakeRuntimeSetup();

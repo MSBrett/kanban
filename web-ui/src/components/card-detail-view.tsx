@@ -1,5 +1,5 @@
 import type { DropResult } from "@hello-pangea/dnd";
-import { Files, GitCompareArrows, Maximize2, MessageSquare, Minimize2, X } from "lucide-react";
+import { Files, GitCompareArrows, Maximize2, MessageSquare, Minimize2, Workflow, X } from "lucide-react";
 import type { MouseEvent as ReactMouseEvent, ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useHotkeys } from "react-hotkeys-hook";
@@ -8,6 +8,7 @@ import { ClineAgentChatPanel, type ClineAgentChatPanelHandle } from "@/component
 import { ColumnContextPanel } from "@/components/detail-panels/column-context-panel";
 import { type DiffLineComment, DiffViewerPanel } from "@/components/detail-panels/diff-viewer-panel";
 import { FileTreePanel } from "@/components/detail-panels/file-tree-panel";
+import { TaskProcessPanel } from "@/components/task-process-panel";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import type { ClineChatActionResult } from "@/hooks/use-cline-chat-runtime-actions";
@@ -29,7 +30,12 @@ import type {
 import { useRuntimeWorkspaceChanges } from "@/runtime/use-runtime-workspace-changes";
 import { useTaskWorkspaceStateVersionValue } from "@/stores/workspace-metadata-store";
 import { useTerminalThemeColors } from "@/terminal/theme-colors";
-import { type BoardCard, type CardSelection, getTaskAutoReviewCancelButtonLabel } from "@/types";
+import {
+	type BoardCard,
+	type CardSelection,
+	getTaskAutoReviewCancelButtonLabel,
+	type TaskProcessVerdict,
+} from "@/types";
 import { useWindowEvent } from "@/utils/react-use";
 
 // We still poll the open detail diff because line content can change without changing
@@ -194,10 +200,12 @@ function WorkspaceChangesEmptyPanel({ title }: { title: string }): React.ReactEl
 	);
 }
 
-type MobileTab = "chat" | "diff" | "files";
+type MobileTab = "chat" | "process" | "diff" | "files";
+type RightInspectorMode = "process" | RuntimeWorkspaceChangesMode;
 
-const MOBILE_TABS: { id: MobileTab; label: string; icon: React.ReactElement }[] = [
+const MOBILE_TABS: { id: MobileTab; label: string; icon: React.ReactElement; requiresProcess?: boolean }[] = [
 	{ id: "chat", label: "Chat", icon: <MessageSquare size={14} /> },
+	{ id: "process", label: "Process", icon: <Workflow size={14} />, requiresProcess: true },
 	{ id: "diff", label: "Diff", icon: <GitCompareArrows size={14} /> },
 	{ id: "files", label: "Files", icon: <Files size={14} /> },
 ];
@@ -205,11 +213,13 @@ const MOBILE_TABS: { id: MobileTab; label: string; icon: React.ReactElement }[] 
 function MobileDetailTabBar({
 	activeTab,
 	onTabChange,
+	hasProcess,
 }: {
 	activeTab: MobileTab;
 	onTabChange: (tab: MobileTab) => void;
+	hasProcess: boolean;
 }): React.ReactElement {
-	const tabs = MOBILE_TABS;
+	const tabs = MOBILE_TABS.filter((tab) => !tab.requiresProcess || hasProcess);
 	return (
 		<div className="flex items-center border-b border-border" style={{ minHeight: 36 }}>
 			{tabs.map((tab) => (
@@ -266,12 +276,14 @@ function DiffToolbar({
 	onModeChange,
 	isExpanded,
 	onToggleExpand,
+	hasProcess,
 	hideExpand,
 }: {
-	mode: RuntimeWorkspaceChangesMode;
-	onModeChange: (mode: RuntimeWorkspaceChangesMode) => void;
+	mode: RightInspectorMode;
+	onModeChange: (mode: RightInspectorMode) => void;
 	isExpanded: boolean;
 	onToggleExpand: () => void;
+	hasProcess: boolean;
 	hideExpand?: boolean;
 }): React.ReactElement {
 	return (
@@ -287,6 +299,11 @@ function DiffToolbar({
 				/>
 			) : null}
 			<div className="inline-flex items-center gap-0.5 rounded-md p-0.5">
+				{hasProcess ? (
+					<DiffModeButton active={mode === "process"} onClick={() => onModeChange("process")}>
+						Process
+					</DiffModeButton>
+				) : null}
 				<DiffModeButton active={mode === "working_copy"} onClick={() => onModeChange("working_copy")}>
 					All Changes
 				</DiffModeButton>
@@ -341,6 +358,10 @@ export function CardDetailView({
 	moveToTrashLoadingById,
 	onAddReviewComments,
 	onSendReviewComments,
+	onAppendProcessNote,
+	onTaskProcessVerdict,
+	onReopenTaskProcess,
+	onRunProcessStage,
 	onSendClineChatMessage,
 	onCancelClineChatTurn,
 	onLoadClineChatMessages,
@@ -399,6 +420,17 @@ export function CardDetailView({
 	moveToTrashLoadingById?: Record<string, boolean>;
 	onAddReviewComments?: (taskId: string, text: string) => void;
 	onSendReviewComments?: (taskId: string, text: string) => void;
+	onAppendProcessNote?: (taskId: string, notes: string, expectedStage: string, agent: string, model?: string) => void;
+	onTaskProcessVerdict?: (
+		taskId: string,
+		verdict: TaskProcessVerdict,
+		notes: string,
+		expectedStage: string,
+		agent: string,
+		model?: string,
+	) => void;
+	onReopenTaskProcess?: (taskId: string, notes: string, expectedStage: string, agent: string, model?: string) => void;
+	onRunProcessStage?: (taskId: string) => void;
 	onSendClineChatMessage?: (
 		taskId: string,
 		text: string,
@@ -438,7 +470,10 @@ export function CardDetailView({
 	const terminalThemeColors = useTerminalThemeColors();
 	const [selectedPath, setSelectedPath] = useState<string | null>(null);
 	const [diffComments, setDiffComments] = useState<Map<string, DiffLineComment>>(new Map());
-	const [diffMode, setDiffMode] = useState<RuntimeWorkspaceChangesMode>("working_copy");
+	const hasTaskProcess = selection.card.process !== undefined;
+	const [rightInspectorMode, setRightInspectorMode] = useState<RightInspectorMode>(
+		hasTaskProcess ? "process" : "working_copy",
+	);
 	const [isDiffExpanded, setIsDiffExpanded] = useState(false);
 	const {
 		taskCardsPanelRatio,
@@ -480,8 +515,9 @@ export function CardDetailView({
 		true,
 	);
 	const taskWorkspaceStateVersion = useTaskWorkspaceStateVersionValue(selection.card.id);
+	const diffMode: RuntimeWorkspaceChangesMode = rightInspectorMode === "last_turn" ? "last_turn" : "working_copy";
 	const lastTurnViewKey =
-		diffMode === "last_turn"
+		rightInspectorMode === "last_turn"
 			? [
 					sessionSummary?.state ?? "none",
 					sessionSummary?.latestTurnCheckpoint?.commit ?? "none",
@@ -494,7 +530,9 @@ export function CardDetailView({
 		selection.card.baseRef,
 		diffMode,
 		taskWorkspaceStateVersion,
-		isDocumentVisible && !gitHistoryPanel && selection.column.id !== "trash" ? DETAIL_DIFF_POLL_INTERVAL_MS : null,
+		rightInspectorMode !== "process" && isDocumentVisible && !gitHistoryPanel && selection.column.id !== "trash"
+			? DETAIL_DIFF_POLL_INTERVAL_MS
+			: null,
 		lastTurnViewKey,
 		true,
 	);
@@ -594,8 +632,9 @@ export function CardDetailView({
 
 	useEffect(() => {
 		setDiffComments(new Map());
-		setDiffMode("working_copy");
-	}, [selection.card.id]);
+		setRightInspectorMode(hasTaskProcess ? "process" : "working_copy");
+		setMobileTab("chat");
+	}, [hasTaskProcess, selection.card.id]);
 
 	const handleToggleDiffExpand = useCallback(() => {
 		if (!isDiffExpanded && bottomTerminalOpen) {
@@ -630,81 +669,101 @@ export function CardDetailView({
 	);
 
 	const showBottomTerminal = bottomTerminalOpen && !!bottomTerminalTaskId;
+	const processPanel = (
+		<TaskProcessPanel
+			card={selection.card}
+			onAppend={onAppendProcessNote}
+			onVerdict={onTaskProcessVerdict}
+			onReopen={onReopenTaskProcess}
+			onRunStage={onRunProcessStage}
+			workspacePath={workspacePath}
+			kanbanCommand={runtimeConfig?.kanbanCommand ?? null}
+			variant="inline"
+		/>
+	);
 
 	const agentChatPanel = showClineAgentChatPanel ? (
-		<ClineAgentChatPanel
-			ref={clineAgentChatPanelRef}
-			taskId={selection.card.id}
-			summary={sessionSummary}
-			taskColumnId={selection.column.id}
-			defaultMode="act"
-			showComposerModeToggle={false}
-			workspaceId={currentProjectId}
-			runtimeConfig={runtimeConfig}
-			taskClineSettings={selection.card.clineSettings}
-			taskHasExplicitClineSettings={hasExplicitTaskClineSettings}
-			onClineSettingsSaved={onClineSettingsSaved}
-			onTaskClineSettingsChanged={onTaskClineSettingsChanged}
-			onSendMessage={onSendClineChatMessage}
-			onCancelTurn={onCancelClineChatTurn}
-			onLoadMessages={onLoadClineChatMessages}
-			incomingMessages={streamedClineChatMessages}
-			incomingMessage={latestClineChatMessage}
-			onCommit={onAgentCommitTask ? () => onAgentCommitTask(selection.card.id) : undefined}
-			onOpenPr={onAgentOpenPrTask ? () => onAgentOpenPrTask(selection.card.id) : undefined}
-			isCommitLoading={agentCommitTaskLoadingById?.[selection.card.id] ?? false}
-			isOpenPrLoading={agentOpenPrTaskLoadingById?.[selection.card.id] ?? false}
-			showMoveToTrash={showMoveToTrashActions}
-			onMoveToTrash={onMoveToTrash}
-			isMoveToTrashLoading={isMoveToTrashLoading}
-			onCancelAutomaticAction={
-				selection.card.autoReviewEnabled === true && onCancelAutomaticTaskAction
-					? () => onCancelAutomaticTaskAction(selection.card.id)
-					: undefined
-			}
-			cancelAutomaticActionLabel={
-				selection.card.autoReviewEnabled === true
-					? getTaskAutoReviewCancelButtonLabel(selection.card.autoReviewMode)
-					: null
-			}
-		/>
+		<div className="flex min-h-0 min-w-0 flex-1 flex-col">
+			<div className="flex min-h-0 min-w-0 flex-1">
+				<ClineAgentChatPanel
+					ref={clineAgentChatPanelRef}
+					taskId={selection.card.id}
+					summary={sessionSummary}
+					taskColumnId={selection.column.id}
+					defaultMode="act"
+					showComposerModeToggle={false}
+					workspaceId={currentProjectId}
+					runtimeConfig={runtimeConfig}
+					taskClineSettings={selection.card.clineSettings}
+					taskHasExplicitClineSettings={hasExplicitTaskClineSettings}
+					onClineSettingsSaved={onClineSettingsSaved}
+					onTaskClineSettingsChanged={onTaskClineSettingsChanged}
+					onSendMessage={onSendClineChatMessage}
+					onCancelTurn={onCancelClineChatTurn}
+					onLoadMessages={onLoadClineChatMessages}
+					incomingMessages={streamedClineChatMessages}
+					incomingMessage={latestClineChatMessage}
+					onCommit={onAgentCommitTask ? () => onAgentCommitTask(selection.card.id) : undefined}
+					onOpenPr={onAgentOpenPrTask ? () => onAgentOpenPrTask(selection.card.id) : undefined}
+					isCommitLoading={agentCommitTaskLoadingById?.[selection.card.id] ?? false}
+					isOpenPrLoading={agentOpenPrTaskLoadingById?.[selection.card.id] ?? false}
+					showMoveToTrash={showMoveToTrashActions}
+					onMoveToTrash={onMoveToTrash}
+					isMoveToTrashLoading={isMoveToTrashLoading}
+					onCancelAutomaticAction={
+						selection.card.autoReviewEnabled === true && onCancelAutomaticTaskAction
+							? () => onCancelAutomaticTaskAction(selection.card.id)
+							: undefined
+					}
+					cancelAutomaticActionLabel={
+						selection.card.autoReviewEnabled === true
+							? getTaskAutoReviewCancelButtonLabel(selection.card.autoReviewMode)
+							: null
+					}
+				/>
+			</div>
+		</div>
 	) : (
-		<AgentTerminalPanel
-			taskId={selection.card.id}
-			workspaceId={currentProjectId}
-			terminalEnabled={isTaskTerminalEnabled}
-			summary={sessionSummary}
-			onSummary={onSessionSummary}
-			onCommit={onAgentCommitTask ? () => onAgentCommitTask(selection.card.id) : undefined}
-			onOpenPr={onAgentOpenPrTask ? () => onAgentOpenPrTask(selection.card.id) : undefined}
-			isCommitLoading={agentCommitTaskLoadingById?.[selection.card.id] ?? false}
-			isOpenPrLoading={agentOpenPrTaskLoadingById?.[selection.card.id] ?? false}
-			showSessionToolbar={false}
-			autoFocus
-			showMoveToTrash={showMoveToTrashActions}
-			onMoveToTrash={onMoveToTrash}
-			isMoveToTrashLoading={isMoveToTrashLoading}
-			onCancelAutomaticAction={
-				selection.card.autoReviewEnabled === true && onCancelAutomaticTaskAction
-					? () => onCancelAutomaticTaskAction(selection.card.id)
-					: undefined
-			}
-			cancelAutomaticActionLabel={
-				selection.card.autoReviewEnabled === true
-					? getTaskAutoReviewCancelButtonLabel(selection.card.autoReviewMode)
-					: null
-			}
-			panelBackgroundColor="var(--color-surface-0)"
-			terminalBackgroundColor={terminalThemeColors.surfacePrimary}
-			cursorColor={terminalThemeColors.textPrimary}
-			taskColumnId={selection.column.id}
-		/>
+		<div className="flex min-h-0 min-w-0 flex-1 flex-col">
+			<div className="flex min-h-0 min-w-0 flex-1">
+				<AgentTerminalPanel
+					taskId={selection.card.id}
+					workspaceId={currentProjectId}
+					terminalEnabled={isTaskTerminalEnabled}
+					summary={sessionSummary}
+					onSummary={onSessionSummary}
+					onCommit={onAgentCommitTask ? () => onAgentCommitTask(selection.card.id) : undefined}
+					onOpenPr={onAgentOpenPrTask ? () => onAgentOpenPrTask(selection.card.id) : undefined}
+					isCommitLoading={agentCommitTaskLoadingById?.[selection.card.id] ?? false}
+					isOpenPrLoading={agentOpenPrTaskLoadingById?.[selection.card.id] ?? false}
+					showSessionToolbar
+					autoFocus
+					showMoveToTrash={showMoveToTrashActions}
+					onMoveToTrash={onMoveToTrash}
+					isMoveToTrashLoading={isMoveToTrashLoading}
+					onCancelAutomaticAction={
+						selection.card.autoReviewEnabled === true && onCancelAutomaticTaskAction
+							? () => onCancelAutomaticTaskAction(selection.card.id)
+							: undefined
+					}
+					cancelAutomaticActionLabel={
+						selection.card.autoReviewEnabled === true
+							? getTaskAutoReviewCancelButtonLabel(selection.card.autoReviewMode)
+							: null
+					}
+					panelBackgroundColor="var(--color-surface-0)"
+					terminalBackgroundColor={terminalThemeColors.surfacePrimary}
+					cursorColor={terminalThemeColors.textPrimary}
+					taskColumnId={selection.column.id}
+				/>
+			</div>
+		</div>
 	);
 
 	if (isMobile) {
 		return (
 			<div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-surface-0">
-				<MobileDetailTabBar activeTab={mobileTab} onTabChange={setMobileTab} />
+				<MobileDetailTabBar activeTab={mobileTab} onTabChange={setMobileTab} hasProcess={hasTaskProcess} />
 				<div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
 					<div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
 						{/* Chat panel */}
@@ -714,6 +773,15 @@ export function CardDetailView({
 						>
 							{agentChatPanel}
 						</div>
+						{/* Process panel */}
+						{hasTaskProcess ? (
+							<div
+								className="min-h-0 min-w-0 flex-1 overflow-y-auto bg-surface-0 p-2"
+								style={{ display: mobileTab === "process" ? "block" : "none" }}
+							>
+								{processPanel}
+							</div>
+						) : null}
 						{/* Diff panel */}
 						<div
 							className="min-h-0 min-w-0 flex-1 flex-col"
@@ -722,9 +790,12 @@ export function CardDetailView({
 							{isRuntimeAvailable ? (
 								<DiffToolbar
 									mode={diffMode}
-									onModeChange={setDiffMode}
+									onModeChange={(mode) => {
+										setRightInspectorMode(mode === "process" ? "working_copy" : mode);
+									}}
 									isExpanded={false}
 									onToggleExpand={handleToggleDiffExpand}
+									hasProcess={false}
 									hideExpand
 								/>
 							) : null}
@@ -861,14 +932,19 @@ export function CardDetailView({
 							>
 								{isRuntimeAvailable ? (
 									<DiffToolbar
-										mode={diffMode}
-										onModeChange={setDiffMode}
+										mode={rightInspectorMode}
+										onModeChange={setRightInspectorMode}
 										isExpanded={isDiffExpanded}
 										onToggleExpand={handleToggleDiffExpand}
+										hasProcess={hasTaskProcess}
 									/>
 								) : null}
 								<div className="flex min-h-0 flex-1">
-									{isWorkspaceChangesPending ? (
+									{rightInspectorMode === "process" ? (
+										<div className="min-h-0 min-w-0 flex-1 overflow-y-auto bg-surface-0 p-2">
+											{processPanel}
+										</div>
+									) : isWorkspaceChangesPending ? (
 										<WorkspaceChangesLoadingPanel panelFlex={detailDiffFileTreePanelFlex} />
 									) : hasNoWorkspaceFileChanges ? (
 										<WorkspaceChangesEmptyPanel title={emptyDiffTitle} />

@@ -1,6 +1,7 @@
 import * as RadixCheckbox from "@radix-ui/react-checkbox";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import * as RadixSwitch from "@radix-ui/react-switch";
+import { getTaskProcessDefinitions } from "@runtime-task-process";
 
 import {
 	ArrowBigUp,
@@ -28,7 +29,7 @@ import { Dialog, DialogBody, DialogFooter, DialogHeader } from "@/components/ui/
 import { NativeSelect } from "@/components/ui/native-select";
 import type { RuntimeAgentId, RuntimeClineReasoningEffort, RuntimeTaskClineSettings } from "@/runtime/types";
 import { LocalStorageKey } from "@/storage/local-storage-store";
-import type { TaskAutoReviewMode, TaskImage } from "@/types";
+import type { TaskAutoReviewMode, TaskImage, TaskProcessDefinition } from "@/types";
 import { isMacPlatform, pasteShortcutLabel } from "@/utils/platform";
 import { useRawLocalStorageValue } from "@/utils/react-use";
 
@@ -122,6 +123,9 @@ export function TaskCreateDialog({
 	onAgentIdChange,
 	clineSettings,
 	onClineSettingsChange,
+	processId,
+	onProcessIdChange,
+	processDefinitions,
 	defaultAgentId,
 	defaultProviderId,
 	defaultModelId,
@@ -153,6 +157,9 @@ export function TaskCreateDialog({
 	onAgentIdChange?: (value: RuntimeAgentId | undefined) => void;
 	clineSettings?: RuntimeTaskClineSettings | undefined;
 	onClineSettingsChange?: (value: RuntimeTaskClineSettings | undefined) => void;
+	processId?: string | undefined;
+	onProcessIdChange?: (value: string | undefined) => void;
+	processDefinitions?: TaskProcessDefinition[];
 	/** Default agent ID from runtimeConfig.selectedAgentId, used to show "Default (AgentName)" in picker */
 	defaultAgentId?: RuntimeAgentId | null;
 	/** Default Cline provider ID from runtimeConfig.clineProviderSettings.providerId */
@@ -197,6 +204,7 @@ export function TaskCreateDialog({
 	});
 
 	const detectedItems = useMemo(() => parseListItems(prompt), [prompt]);
+	const processOptions = useMemo(() => getTaskProcessDefinitions(processDefinitions ?? []), [processDefinitions]);
 	const validTaskCount = useMemo(() => taskPrompts.filter((p) => p.trim()).length, [taskPrompts]);
 	const effectivePrimaryStartAction =
 		onCreateStartAndOpen || primaryStartAction === "start" ? primaryStartAction : DEFAULT_PRIMARY_START_ACTION;
@@ -544,6 +552,25 @@ export function TaskCreateDialog({
 							emptyText="No branches detected"
 						/>
 					</div>
+
+					{onProcessIdChange ? (
+						<div>
+							<span className="text-[11px] text-text-secondary block mb-1">Process</span>
+							<NativeSelect
+								size="sm"
+								value={processId ?? ""}
+								onChange={(event) => onProcessIdChange(event.currentTarget.value || undefined)}
+								style={{ width: "100%" }}
+							>
+								<option value="">None</option>
+								{processOptions.map((definition) => (
+									<option key={definition.id} value={definition.id}>
+										{definition.name}
+									</option>
+								))}
+							</NativeSelect>
+						</div>
+					) : null}
 
 					<div className="flex items-center gap-2 flex-wrap">
 						<label

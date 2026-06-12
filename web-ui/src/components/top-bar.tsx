@@ -14,6 +14,7 @@ import {
 	Plus,
 	Settings,
 	Terminal,
+	Workflow,
 } from "lucide-react";
 import { useState } from "react";
 import { OpenWorkspaceButton } from "@/components/open-workspace-button";
@@ -295,6 +296,8 @@ export function TopBar({
 	onToggleTerminal,
 	isTerminalOpen,
 	isTerminalLoading,
+	onOpenProcesses,
+	processCount,
 	onToggleGitHistory,
 	isGitHistoryOpen,
 	onOpenSettings,
@@ -330,6 +333,8 @@ export function TopBar({
 	onToggleTerminal?: () => void;
 	isTerminalOpen?: boolean;
 	isTerminalLoading?: boolean;
+	onOpenProcesses?: () => void;
+	processCount?: number;
 	onToggleGitHistory?: () => void;
 	isGitHistoryOpen?: boolean;
 	onOpenSettings?: (section?: SettingsSection) => void;
@@ -631,6 +636,20 @@ export function TopBar({
 									/>
 								</Tooltip>
 							) : null}
+							{!hideProjectDependentActions && onOpenProcesses ? (
+								<Tooltip side="bottom" content="Edit work item processes">
+									<Button
+										variant="ghost"
+										size="sm"
+										icon={<Workflow size={16} />}
+										onClick={onOpenProcesses}
+										aria-label="Processes"
+										className="ml-0.5"
+									>
+										<span className="text-text-tertiary">{processCount ?? 0}</span>
+									</Button>
+								</Tooltip>
+							) : null}
 							{showDebugButton && onOpenDebugDialog ? (
 								<Button
 									variant="ghost"
@@ -667,6 +686,16 @@ export function TopBar({
 									onClick={onToggleTerminal}
 									disabled={Boolean(isTerminalLoading)}
 									aria-label={isTerminalOpen ? "Close terminal" : "Open terminal"}
+									className={MOBILE_TOUCH_TARGET}
+								/>
+							) : null}
+							{!hideProjectDependentActions && onOpenProcesses ? (
+								<Button
+									variant="ghost"
+									size="sm"
+									icon={<Workflow size={16} />}
+									onClick={onOpenProcesses}
+									aria-label="Processes"
 									className={MOBILE_TOUCH_TARGET}
 								/>
 							) : null}

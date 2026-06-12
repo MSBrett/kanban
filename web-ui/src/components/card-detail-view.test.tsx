@@ -1,3 +1,4 @@
+import { createTaskProcess, markTaskProcessRunning } from "@runtime-task-process";
 import { act, forwardRef, type ReactNode, useImperativeHandle } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -92,33 +93,49 @@ function createCard(id: string): BoardCard {
 
 function createSelection(): CardSelection {
 	const card = createCard("task-1");
+	return createSelectionForCard(card, "backlog");
+}
+
+function createSelectionForCard(card: BoardCard, columnId: BoardColumn["id"]): CardSelection {
 	const columns: BoardColumn[] = [
 		{
 			id: "backlog",
 			title: "Backlog",
-			cards: [card],
+			cards: columnId === "backlog" ? [card] : [],
 		},
 		{
 			id: "in_progress",
 			title: "In Progress",
-			cards: [],
+			cards: columnId === "in_progress" ? [card] : [],
 		},
 		{
 			id: "review",
 			title: "Review",
-			cards: [],
+			cards: columnId === "review" ? [card] : [],
 		},
 		{
 			id: "trash",
 			title: "Done",
-			cards: [],
+			cards: columnId === "trash" ? [card] : [],
 		},
 	];
 	return {
 		card,
-		column: columns[0]!,
+		column: columns.find((column) => column.id === columnId) ?? columns[0]!,
 		allColumns: columns,
 	};
+}
+
+function createProcessSelection(): CardSelection {
+	const card: BoardCard = {
+		...createCard("process-task"),
+		process: markTaskProcessRunning(createTaskProcess("tdd", 10), {
+			now: 11,
+			agent: "kanban",
+			notes: "Started test stage.",
+		}),
+	};
+	return createSelectionForCard(card, "in_progress");
 }
 
 type MockedDiffViewerProps = {
@@ -546,7 +563,40 @@ describe("CardDetailView", () => {
 		expect(lastCall?.[0]).toMatchObject({
 			panelBackgroundColor: "var(--color-surface-0)",
 			terminalBackgroundColor: TERMINAL_THEME_COLORS.surfacePrimary,
+			showSessionToolbar: true,
 		});
+	});
+
+	it("keeps the session terminal visible and moves process controls into the right inspector", async () => {
+		await act(async () => {
+			root.render(
+				<CardDetailView
+					selection={createProcessSelection()}
+					currentProjectId="workspace-1"
+					workspacePath="/Users/brett/src/ma-collective/kanban"
+					selectedAgentId="claude"
+					sessionSummary={null}
+					taskSessions={{}}
+					onSessionSummary={() => {}}
+					onCardSelect={() => {}}
+					onTaskDragEnd={() => {}}
+					onMoveToTrash={() => {}}
+					bottomTerminalOpen={false}
+					bottomTerminalTaskId={null}
+					bottomTerminalSummary={null}
+					onBottomTerminalClose={() => {}}
+				/>,
+			);
+		});
+
+		const terminalProps = getLastMockFirstArg<{ showSessionToolbar?: boolean }>(mockAgentTerminalPanel);
+		expect(terminalProps.showSessionToolbar).toBe(true);
+		expect(container.textContent).toContain("Process");
+		expect(container.textContent).toContain("Test Driven Development");
+		expect(container.textContent).toContain("Append");
+		expect(container.textContent).toContain("Pass");
+		expect(container.textContent).toContain("Fail");
+		expect(container.querySelector('[data-testid="diff-viewer-panel"]')).toBeNull();
 	});
 
 	it("queues Add diff comments into the cline composer without sending them", async () => {

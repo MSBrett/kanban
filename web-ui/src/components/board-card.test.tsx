@@ -633,6 +633,72 @@ describe("BoardCard", () => {
 		expect(container.textContent).toContain(preview);
 	});
 
+	it("does not render stale running activity for completed process cards in trash", async () => {
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<BoardCard
+						card={createCard({
+							process: {
+								processId: "slc",
+								processName: "Simple, Lovable, Complete",
+								processDigest: "sha256:test",
+								stageId: "done",
+								status: "complete",
+								updatedAt: 2,
+								history: [
+									{
+										stageId: "swe",
+										verdict: "pass",
+										recordKind: "outcome",
+										agent: "swe",
+										notes: "Implementation passed.",
+										at: 1,
+									},
+								],
+							},
+						})}
+						index={0}
+						columnId="trash"
+						sessionSummary={createSummary("running")}
+					/>
+				</TooltipProvider>,
+			);
+		});
+
+		expect(container.textContent).not.toContain("Thinking...");
+		expect(container.textContent).not.toContain("Cline is working");
+	});
+
+	it("labels completed process trash action as a reopen panel action", async () => {
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<BoardCard
+						card={createCard({
+							process: {
+								processId: "lightweight",
+								processName: "Lightweight",
+								processDigest: "sha256:test",
+								stageId: "done",
+								status: "complete",
+								updatedAt: 2,
+								history: [],
+							},
+						})}
+						index={0}
+						columnId="trash"
+					/>
+				</TooltipProvider>,
+			);
+		});
+
+		expect(container.querySelector('button[aria-label="Open process reopen panel"]')).toBeInstanceOf(
+			HTMLButtonElement,
+		);
+		expect(container.querySelector('button[aria-label="Restore task from done"]')).toBeNull();
+	});
+
 	it("renders session activity as single-line truncated text for running tasks", async () => {
 		const preview =
 			"Reviewing the archived implementation details and collecting the final notes for the handoff before cleanup hidden tail";

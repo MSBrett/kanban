@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { buildKanbanCommandParts, resolveKanbanCommandParts } from "../../src/core/kanban-command";
+import {
+	buildKanbanCommandParts,
+	resolveKanbanCommandLine,
+	resolveKanbanCommandParts,
+} from "../../src/core/kanban-command";
 
 describe("resolveKanbanCommandParts", () => {
 	it("resolves node plus script entrypoint", () => {
@@ -45,5 +49,16 @@ describe("buildKanbanCommandParts", () => {
 				argv: ["/usr/local/bin/node", "/tmp/.npx/321/node_modules/kanban/dist/cli.js"],
 			}),
 		).toEqual(["/usr/local/bin/node", "/tmp/.npx/321/node_modules/kanban/dist/cli.js", "hooks", "ingest"]);
+	});
+});
+
+describe("resolveKanbanCommandLine", () => {
+	it("formats the resolved runtime invocation as a shell-safe command line", () => {
+		expect(
+			resolveKanbanCommandLine({
+				execPath: "/usr/local/bin/node",
+				argv: ["/usr/local/bin/node", "/tmp/.npx/123/node_modules/kanban/dist/cli.js", "--port", "9123"],
+			}),
+		).toBe("'/usr/local/bin/node' '/tmp/.npx/123/node_modules/kanban/dist/cli.js'");
 	});
 });

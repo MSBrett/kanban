@@ -7,8 +7,12 @@ import type {
 	RuntimeTaskAutoReviewMode,
 	RuntimeTaskClineSettings,
 	RuntimeTaskImage,
+	RuntimeTaskProcessDefinition,
+	RuntimeTaskProcessId,
+	RuntimeTaskProcessState,
 } from "./api-contract";
 import { createUniqueTaskId } from "./task-id";
+import { cloneTaskProcess, createTaskProcess } from "./task-process";
 import { resolveTaskTitle } from "./task-title";
 
 export interface RuntimeCreateTaskInput {
@@ -21,6 +25,7 @@ export interface RuntimeCreateTaskInput {
 	images?: RuntimeTaskImage[];
 	agentId?: RuntimeAgentId;
 	clineSettings?: RuntimeTaskClineSettings;
+	processId?: RuntimeTaskProcessId;
 	baseRef: string;
 }
 
@@ -33,6 +38,7 @@ export interface RuntimeUpdateTaskInput {
 	images?: RuntimeTaskImage[];
 	agentId?: RuntimeAgentId | null;
 	clineSettings?: RuntimeTaskClineSettings | null;
+	process?: RuntimeTaskProcessState | null;
 	baseRef: string;
 }
 
@@ -59,6 +65,14 @@ function cloneTaskClineSettings(settings?: RuntimeTaskClineSettings | null): Run
 		...(modelId ? { modelId } : {}),
 		...(settings.reasoningEffort ? { reasoningEffort: settings.reasoningEffort } : {}),
 	};
+}
+
+function resolveProcessDefinitions(board: RuntimeBoardData): readonly RuntimeTaskProcessDefinition[] {
+	return board.processes ?? [];
+}
+
+export function taskHasIncompleteProcess(task: RuntimeBoardCard): boolean {
+	return Boolean(task.process && task.process.status !== "complete");
 }
 
 export interface RuntimeCreateTaskResult {
@@ -210,7 +224,10 @@ function getLinkedBacklogTaskIdsReadyAfterTaskTrashed(
 	taskId: string,
 	fromColumnId: RuntimeBoardColumnId | null,
 ): string[] {
-	if (!taskId || board.dependencies.length === 0 || fromColumnId !== "review") {
+	const task = findTaskLocation(board, taskId)?.task ?? null;
+	const isCompletedPrerequisite =
+		fromColumnId === "review" || (fromColumnId === "in_progress" && task?.process?.status === "complete");
+	if (!taskId || board.dependencies.length === 0 || !isCompletedPrerequisite) {
 		return [];
 	}
 	const readyTaskIds = new Set<string>();
@@ -219,6 +236,16 @@ function getLinkedBacklogTaskIdsReadyAfterTaskTrashed(
 			continue;
 		}
 		if (getTaskColumnId(board, dependency.fromTaskId) !== "backlog") {
+			continue;
+		}
+		const hasOtherBlockingDependency = board.dependencies.some((candidate) => {
+			if (candidate.fromTaskId !== dependency.fromTaskId || candidate.toTaskId === taskId) {
+				return false;
+			}
+			const linkedColumnId = getTaskColumnId(board, candidate.toTaskId);
+			return linkedColumnId !== null && linkedColumnId !== "trash";
+		});
+		if (hasOtherBlockingDependency) {
 			continue;
 		}
 		readyTaskIds.add(dependency.fromTaskId);
@@ -309,6 +336,9 @@ export function addTaskToColumn(
 		images: cloneTaskImages(input.images),
 		...(input.agentId ? { agentId: input.agentId } : {}),
 		...(input.clineSettings !== undefined ? { clineSettings: cloneTaskClineSettings(input.clineSettings) } : {}),
+		...(input.processId
+			? { process: createTaskProcess(input.processId, now, resolveProcessDefinitions(board)) }
+			: {}),
 		baseRef,
 		createdAt: now,
 		updatedAt: now,
@@ -345,6 +375,24 @@ export function getTaskColumnId(board: RuntimeBoardData, taskId: string): Runtim
 	}
 	const found = findTaskLocation(board, normalizedTaskId);
 	return found ? found.columnId : null;
+}
+
+export function getBlockingDependencyTaskIds(board: RuntimeBoardData, taskId: string): string[] {
+	const normalizedTaskId = taskId.trim();
+	if (!normalizedTaskId || getTaskColumnId(board, normalizedTaskId) !== "backlog") {
+		return [];
+	}
+	const blockingTaskIds = new Set<string>();
+	for (const dependency of board.dependencies) {
+		if (dependency.fromTaskId !== normalizedTaskId) {
+			continue;
+		}
+		const linkedColumnId = getTaskColumnId(board, dependency.toTaskId);
+		if (linkedColumnId !== null && linkedColumnId !== "trash") {
+			blockingTaskIds.add(dependency.toTaskId);
+		}
+	}
+	return [...blockingTaskIds];
 }
 
 export function addTaskDependency(
@@ -501,6 +549,14 @@ export function moveTaskToColumn(
 			fromColumnId: null,
 		};
 	}
+	if (targetColumnId === "trash" && taskHasIncompleteProcess(found.task)) {
+		return {
+			moved: false,
+			board,
+			task: found.task,
+			fromColumnId: found.columnId,
+		};
+	}
 	if (found.columnId === targetColumnId) {
 		return {
 			moved: false,
@@ -630,7 +686,59 @@ export function updateTask(
 						: input.clineSettings === null
 							? undefined
 							: cloneTaskClineSettings(input.clineSettings),
+				process: input.process === undefined ? cloneTaskProcess(card.process) : cloneTaskProcess(input.process),
 				baseRef,
+				updatedAt: now,
+			};
+			return updatedTask;
+		});
+		return columnUpdated ? { ...column, cards } : column;
+	});
+
+	if (!updatedTask) {
+		return {
+			board,
+			task: null,
+			updated: false,
+		};
+	}
+
+	return {
+		board: {
+			...board,
+			columns,
+		},
+		task: updatedTask,
+		updated: true,
+	};
+}
+
+export function updateTaskProcess(
+	board: RuntimeBoardData,
+	taskId: string,
+	process: RuntimeTaskProcessState | null,
+	now: number = Date.now(),
+): RuntimeUpdateTaskResult {
+	const normalizedTaskId = taskId.trim();
+	if (!normalizedTaskId) {
+		return {
+			board,
+			task: null,
+			updated: false,
+		};
+	}
+
+	let updatedTask: RuntimeBoardCard | null = null;
+	const columns = board.columns.map((column) => {
+		let columnUpdated = false;
+		const cards = column.cards.map((card) => {
+			if (card.id !== normalizedTaskId) {
+				return card;
+			}
+			columnUpdated = true;
+			updatedTask = {
+				...card,
+				process: cloneTaskProcess(process),
 				updatedAt: now,
 			};
 			return updatedTask;

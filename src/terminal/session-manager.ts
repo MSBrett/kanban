@@ -71,6 +71,7 @@ interface SessionEntry {
 	listeners: Map<number, TerminalSessionListener>;
 	restartRequest: RestartableSessionRequest | null;
 	suppressAutoRestartOnExit: boolean;
+	forceAutoRestartOnExit: boolean;
 	autoRestartTimestamps: number[];
 	pendingAutoRestart: Promise<void> | null;
 }
@@ -86,6 +87,7 @@ export interface StartTaskSessionRequest {
 	images?: RuntimeTaskImage[];
 	startInPlanMode?: boolean;
 	resumeFromTrash?: boolean;
+	replaceActive?: boolean;
 	cols?: number;
 	rows?: number;
 	env?: Record<string, string | undefined>;
@@ -252,6 +254,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 				listeners: new Map(),
 				restartRequest: null,
 				suppressAutoRestartOnExit: false,
+				forceAutoRestartOnExit: false,
 				autoRestartTimestamps: [],
 				pendingAutoRestart: null,
 			});
@@ -296,10 +299,16 @@ export class TerminalSessionManager implements TerminalSessionService {
 		const entry = this.ensureEntry(request.taskId);
 		entry.restartRequest = {
 			kind: "task",
-			request: cloneStartTaskSessionRequest(request),
+			request: cloneStartTaskSessionRequest({ ...request, replaceActive: false }),
 		};
 		if (entry.active && isActiveState(entry.summary.state)) {
-			return cloneSummary(entry.summary);
+			if (!request.replaceActive) {
+				return cloneSummary(entry.summary);
+			}
+			const previousActive = entry.active;
+			stopWorkspaceTrustTimers(previousActive);
+			previousActive.session.stop();
+			entry.active = null;
 		}
 
 		if (entry.active) {
@@ -355,7 +364,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 				cols,
 				rows,
 				onData: (chunk) => {
-					if (!entry.active) {
+					if (!entry.active || entry.active.session !== session) {
 						return;
 					}
 
@@ -449,6 +458,19 @@ export class TerminalSessionManager implements TerminalSessionService {
 					}
 					const currentActive = currentEntry.active;
 					if (!currentActive) {
+						if (launch.cleanup) {
+							void launch.cleanup().catch(() => {
+								// Best effort: cleanup failure is non-critical.
+							});
+						}
+						return;
+					}
+					if (currentActive.session !== session) {
+						if (launch.cleanup) {
+							void launch.cleanup().catch(() => {
+								// Best effort: cleanup failure is non-critical.
+							});
+						}
 						return;
 					}
 					stopWorkspaceTrustTimers(currentActive);
@@ -590,7 +612,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 				cols,
 				rows,
 				onData: (chunk) => {
-					if (!entry.active) {
+					if (!entry.active || entry.active.session !== session) {
 						return;
 					}
 
@@ -624,6 +646,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 					}
 					const currentActive = currentEntry.active;
 					if (!currentActive) {
+						return;
+					}
+					if (currentActive.session !== session) {
 						return;
 					}
 					stopWorkspaceTrustTimers(currentActive);
@@ -972,6 +997,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			listeners: new Map(),
 			restartRequest: null,
 			suppressAutoRestartOnExit: false,
+			forceAutoRestartOnExit: false,
 			autoRestartTimestamps: [],
 			pendingAutoRestart: null,
 		};
@@ -982,10 +1008,15 @@ export class TerminalSessionManager implements TerminalSessionService {
 	private shouldAutoRestart(entry: SessionEntry): boolean {
 		const wasSuppressed = entry.suppressAutoRestartOnExit;
 		entry.suppressAutoRestartOnExit = false;
+		const wasForced = entry.forceAutoRestartOnExit;
+		entry.forceAutoRestartOnExit = false;
 		if (wasSuppressed) {
 			return false;
 		}
-		if (entry.listeners.size === 0 || entry.restartRequest?.kind !== "task") {
+		if (entry.restartRequest?.kind !== "task") {
+			return false;
+		}
+		if (!wasForced && entry.listeners.size === 0) {
 			return false;
 		}
 		const currentTime = now();

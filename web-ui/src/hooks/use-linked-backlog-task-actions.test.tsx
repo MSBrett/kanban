@@ -1,7 +1,7 @@
+import { createTaskProcess } from "@runtime-task-process";
 import { act, useEffect, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
 import { useLinkedBacklogTaskActions } from "@/hooks/use-linked-backlog-task-actions";
 import { getDetailTerminalTaskId } from "@/hooks/use-terminal-panels";
 import type { BoardCard, BoardData, BoardDependency } from "@/types";
@@ -269,6 +269,67 @@ describe("useLinkedBacklogTaskActions", () => {
 		expect(startBacklogTaskWithAnimation.mock.calls[1]?.[0]).toMatchObject({ id: "task-3" });
 		expect(waitForBacklogStartAnimationAvailability).toHaveBeenCalledTimes(1);
 		expect(kickoffTaskInProgress).not.toHaveBeenCalled();
+		expect(trackTasksAutoStartedFromDependencyMock).toHaveBeenCalledWith(1);
+	});
+
+	it("passes process-backed dependency-unblocked tasks into the start flow", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+		const startBacklogTaskWithAnimation = vi.fn(async (_task: BoardCard) => true);
+		const processBackedTask: BoardCard = {
+			...createTask("task-process", "Process-backed backlog task", 1),
+			process: createTaskProcess("lightweight", 100),
+		};
+		const reviewTask = createTask("task-review", "Review prerequisite", 2);
+		const boardFactory = (): BoardData => ({
+			columns: [
+				{
+					id: "backlog",
+					title: "Backlog",
+					cards: [processBackedTask],
+				},
+				{ id: "in_progress", title: "In Progress", cards: [] },
+				{
+					id: "review",
+					title: "Review",
+					cards: [reviewTask],
+				},
+				{ id: "trash", title: "Done", cards: [] },
+			],
+			dependencies: [
+				{ id: "dep-process", fromTaskId: processBackedTask.id, toTaskId: reviewTask.id, createdAt: 10 },
+			],
+		});
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					boardFactory={boardFactory}
+					startBacklogTaskWithAnimation={startBacklogTaskWithAnimation}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+
+		if (latestSnapshot === null) {
+			throw new Error("Expected a hook snapshot.");
+		}
+		const initialSnapshot = latestSnapshot as HookSnapshot;
+
+		await act(async () => {
+			await initialSnapshot.confirmMoveTaskToTrash(reviewTask, initialSnapshot.board);
+		});
+
+		expect(startBacklogTaskWithAnimation).toHaveBeenCalledTimes(1);
+		expect(startBacklogTaskWithAnimation.mock.calls[0]?.[0]).toMatchObject({
+			id: processBackedTask.id,
+			process: {
+				processId: "lightweight",
+				stageId: "pending",
+				status: "ready",
+			},
+		});
 		expect(trackTasksAutoStartedFromDependencyMock).toHaveBeenCalledWith(1);
 	});
 

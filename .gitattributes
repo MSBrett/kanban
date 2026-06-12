@@ -1,0 +1,2 @@
+# Keep source files LF regardless of the caller's global Git autocrlf setting.
+* text=auto eol=lf

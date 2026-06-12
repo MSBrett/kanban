@@ -1,5 +1,5 @@
+import { createTaskProcess, markTaskProcessRunning, transitionTaskProcess } from "@runtime-task-process";
 import { afterEach, describe, expect, it, vi } from "vitest";
-
 import { createInitialBoardData } from "@/data/board-data";
 import {
 	addTaskDependency,
@@ -9,13 +9,23 @@ import {
 	applyTaskDetailClineSettingsSelection,
 	clearColumnTasks,
 	disableTaskAutoReview,
+	getBlockingDependencyTaskIds,
 	getTaskColumnId,
 	moveTaskToColumn,
 	normalizeBoardData,
 	trashTaskAndGetReadyLinkedTaskIds,
+	updateTaskProcess,
 	updateTaskTitle,
 } from "@/state/board-state";
 import type { ProgrammaticCardMoveInFlight } from "@/state/drag-rules";
+
+function recordRunningStage(
+	process: Parameters<typeof transitionTaskProcess>[0],
+	verdict: Parameters<typeof transitionTaskProcess>[1],
+	options: Parameters<typeof transitionTaskProcess>[2] = {},
+): ReturnType<typeof transitionTaskProcess> {
+	return transitionTaskProcess(markTaskProcessRunning(process), verdict, options);
+}
 
 function createBacklogBoard(taskPrompts: string[]): {
 	board: ReturnType<typeof createInitialBoardData>;
@@ -157,9 +167,9 @@ describe("board dependency state", () => {
 		const moveATrash = trashTaskAndGetReadyLinkedTaskIds(dependencyB.board, taskA);
 		expect(moveATrash.moved).toBe(true);
 		expect(moveATrash.board.dependencies).toHaveLength(1);
-		expect(moveATrash.readyTaskIds).toEqual([taskC]);
+		expect(moveATrash.readyTaskIds).toEqual([]);
 
-		const moveBTrash = trashTaskAndGetReadyLinkedTaskIds(dependencyB.board, taskB);
+		const moveBTrash = trashTaskAndGetReadyLinkedTaskIds(moveATrash.board, taskB);
 		expect(moveBTrash.moved).toBe(true);
 		expect(moveBTrash.readyTaskIds).toEqual([taskC]);
 	});
@@ -177,6 +187,57 @@ describe("board dependency state", () => {
 		const trashed = trashTaskAndGetReadyLinkedTaskIds(linked.board, taskA);
 		expect(trashed.readyTaskIds).toEqual([]);
 		expect(trashed.board.dependencies).toEqual([]);
+	});
+
+	it("unlocks backlog cards when an in-progress process reaches terminal and is trashed", () => {
+		const fixture = createBacklogBoard(["Task A", "Task B"]);
+		const taskA = requireTaskId(fixture.taskIdByPrompt["Task A"], "Task A");
+		const taskB = requireTaskId(fixture.taskIdByPrompt["Task B"], "Task B");
+		const movedA = moveTaskToColumn(fixture.board, taskA, "in_progress");
+		expect(movedA.moved).toBe(true);
+
+		const linked = addTaskDependency(movedA.board, taskA, taskB);
+		expect(linked.added).toBe(true);
+		const pending = createTaskProcess("lightweight", 100);
+		const swe = transitionTaskProcess(pending, "pass", { now: 101 });
+		const blue = recordRunningStage(swe, "pass", { now: 102 });
+		const done = recordRunningStage(blue, "pass", { now: 103 });
+		const completed = updateTaskProcess(linked.board, taskA, done);
+		expect(completed.updated).toBe(true);
+
+		const trashed = trashTaskAndGetReadyLinkedTaskIds(completed.board, taskA);
+		expect(trashed.readyTaskIds).toEqual([taskB]);
+		expect(trashed.board.dependencies).toEqual([]);
+	});
+
+	it("does not move incomplete process cards to trash", () => {
+		const fixture = createBacklogBoard(["Task A", "Task B"]);
+		const taskA = requireTaskId(fixture.taskIdByPrompt["Task A"], "Task A");
+		const movedA = moveTaskToColumn(fixture.board, taskA, "in_progress");
+		expect(movedA.moved).toBe(true);
+		const assigned = updateTaskProcess(movedA.board, taskA, createTaskProcess("lightweight", 100));
+		expect(assigned.updated).toBe(true);
+
+		const directMove = moveTaskToColumn(assigned.board, taskA, "trash");
+		expect(directMove.moved).toBe(false);
+		expect(getTaskColumnId(directMove.board, taskA)).toBe("in_progress");
+
+		const trashed = trashTaskAndGetReadyLinkedTaskIds(assigned.board, taskA);
+		expect(trashed.moved).toBe(false);
+		expect(trashed.readyTaskIds).toEqual([]);
+		expect(getTaskColumnId(trashed.board, taskA)).toBe("in_progress");
+
+		const dragMove = applyDragResult(assigned.board, {
+			draggableId: taskA,
+			type: "CARD",
+			source: { droppableId: "in_progress", index: 0 },
+			destination: { droppableId: "trash", index: 0 },
+			mode: "SNAP",
+			reason: "DROP",
+			combine: null,
+		});
+		expect(dragMove.moveEvent).toBeUndefined();
+		expect(getTaskColumnId(dragMove.board, taskA)).toBe("in_progress");
 	});
 
 	it("removes dependency links once both linked cards are in trash", () => {
@@ -231,6 +292,45 @@ describe("board dependency state", () => {
 		const autoStarted = moveTaskToColumn(trashB.board, taskC, "in_progress");
 		expect(autoStarted.moved).toBe(true);
 		expect(autoStarted.board.dependencies).toEqual([]);
+	});
+
+	it("reports unfinished dependency blockers for backlog cards", () => {
+		const fixture = createBacklogBoard(["Task A", "Task B", "Task C"]);
+		const taskA = requireTaskId(fixture.taskIdByPrompt["Task A"], "Task A");
+		const taskB = requireTaskId(fixture.taskIdByPrompt["Task B"], "Task B");
+		const taskC = requireTaskId(fixture.taskIdByPrompt["Task C"], "Task C");
+		const movedB = moveTaskToColumn(fixture.board, taskB, "review");
+		const linked = addTaskDependency(movedB.board, taskA, taskB);
+		const secondLink = addTaskDependency(linked.board, taskC, taskB);
+
+		expect(getBlockingDependencyTaskIds(secondLink.board, taskA)).toEqual([taskB]);
+		expect(getBlockingDependencyTaskIds(secondLink.board, taskC)).toEqual([taskB]);
+
+		const completed = moveTaskToColumn(secondLink.board, taskB, "trash");
+		expect(getBlockingDependencyTaskIds(completed.board, taskA)).toEqual([]);
+		expect(getBlockingDependencyTaskIds(completed.board, taskB)).toEqual([]);
+	});
+
+	it("rejects manual backlog to in-progress drags when dependencies are unfinished", () => {
+		const fixture = createBacklogBoard(["Task A", "Task B"]);
+		const taskA = requireTaskId(fixture.taskIdByPrompt["Task A"], "Task A");
+		const taskB = requireTaskId(fixture.taskIdByPrompt["Task B"], "Task B");
+		const movedB = moveTaskToColumn(fixture.board, taskB, "review");
+		const linked = addTaskDependency(movedB.board, taskA, taskB);
+
+		const attemptedStart = applyDragResult(linked.board, {
+			draggableId: taskA,
+			type: "CARD",
+			source: { droppableId: "backlog", index: 0 },
+			destination: { droppableId: "in_progress", index: 0 },
+			mode: "SNAP",
+			reason: "DROP",
+			combine: null,
+		});
+
+		expect(attemptedStart.moveEvent).toBeUndefined();
+		expect(getTaskColumnId(attemptedStart.board, taskA)).toBe("backlog");
+		expect(getTaskColumnId(attemptedStart.board, taskB)).toBe("review");
 	});
 
 	it("keeps manual in-progress to review drags disabled", () => {

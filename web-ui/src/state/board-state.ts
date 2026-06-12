@@ -1,5 +1,6 @@
 import type { DropResult } from "@hello-pangea/dnd";
 import { createShortTaskId } from "@runtime-task-id";
+import { createTaskProcess } from "@runtime-task-process";
 import * as runtimeTaskState from "@runtime-task-state";
 
 import { createInitialBoardData } from "@/data/board-data";
@@ -16,6 +17,7 @@ import {
 	resolveTaskAutoReviewMode,
 	type TaskAutoReviewMode,
 	type TaskImage,
+	type TaskProcessState,
 } from "@/types";
 
 export interface TaskDraft {
@@ -27,6 +29,8 @@ export interface TaskDraft {
 	images?: TaskImage[];
 	agentId?: RuntimeAgentId;
 	clineSettings?: RuntimeTaskClineSettings;
+	processId?: string;
+	process?: TaskProcessState | null;
 	baseRef: string;
 }
 
@@ -159,6 +163,7 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 		baseRef?: unknown;
 		agentId?: unknown;
 		clineSettings?: unknown;
+		process?: unknown;
 		clineProviderId?: unknown;
 		clineModelId?: unknown;
 		clineReasoningEffort?: unknown;
@@ -199,6 +204,7 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 		baseRef,
 		...(typeof card.agentId === "string" && card.agentId ? { agentId: card.agentId as RuntimeAgentId } : {}),
 		...(clineSettings !== undefined ? { clineSettings } : {}),
+		...(card.process && typeof card.process === "object" ? { process: card.process as TaskProcessState } : {}),
 		createdAt: typeof card.createdAt === "number" ? card.createdAt : now,
 		updatedAt: typeof card.updatedAt === "number" ? card.updatedAt : now,
 	};
@@ -267,6 +273,7 @@ export function normalizeBoardData(rawBoard: unknown): BoardData | null {
 
 	const candidateColumns = (rawBoard as { columns?: unknown }).columns;
 	const candidateDependencies = (rawBoard as { dependencies?: unknown }).dependencies;
+	const candidateProcesses = (rawBoard as { processes?: unknown }).processes;
 	if (!Array.isArray(candidateColumns)) {
 		return null;
 	}
@@ -310,10 +317,16 @@ export function normalizeBoardData(rawBoard: unknown): BoardData | null {
 			normalizedDependencies.push(dependency);
 		}
 	}
+	const normalizedProcesses = Array.isArray(candidateProcesses)
+		? candidateProcesses.filter((process): process is NonNullable<BoardData["processes"]>[number] =>
+				Boolean(process && typeof process === "object"),
+			)
+		: [];
 
 	return runtimeTaskState.updateTaskDependencies({
 		columns: normalizedColumns,
 		dependencies: normalizedDependencies,
+		processes: normalizedProcesses,
 	});
 }
 
@@ -346,6 +359,7 @@ export function addTaskToColumnWithResult(
 			images: draft.images,
 			agentId: draft.agentId,
 			clineSettings: draft.clineSettings,
+			processId: draft.processId,
 			baseRef: draft.baseRef,
 		},
 		createBrowserUuid,
@@ -384,6 +398,10 @@ export function trashTaskAndGetReadyLinkedTaskIds(
 	taskId: string,
 ): { board: BoardData; moved: boolean; readyTaskIds: string[] } {
 	return runtimeTaskState.trashTaskAndGetReadyLinkedTaskIds(board, taskId);
+}
+
+export function taskHasIncompleteProcess(task: BoardCard): boolean {
+	return runtimeTaskState.taskHasIncompleteProcess(task);
 }
 
 export function applyDragResult(
@@ -431,10 +449,20 @@ export function applyDragResult(
 	if (!isAllowedCrossColumnMove) {
 		return { board };
 	}
+	if (
+		sourceColumn.id === "backlog" &&
+		destinationColumn.id === "in_progress" &&
+		runtimeTaskState.getBlockingDependencyTaskIds(board, result.draggableId).length > 0
+	) {
+		return { board };
+	}
 
 	const sourceCards = Array.from(sourceColumn.cards);
 	const [movedCard] = sourceCards.splice(source.index, 1);
 	if (!movedCard) {
+		return { board };
+	}
+	if (destinationColumn.id === "trash" && runtimeTaskState.taskHasIncompleteProcess(movedCard)) {
 		return { board };
 	}
 
@@ -529,8 +557,13 @@ export function updateTask(board: BoardData, taskId: string, draft: TaskDraft): 
 			}
 			columnUpdated = true;
 			updated = true;
+			const nextProcess =
+				draft.process === undefined && draft.processId
+					? createTaskProcess(draft.processId, Date.now(), board.processes ?? [])
+					: draft.process;
+			const { process: _currentProcess, ...cardWithoutProcess } = card;
 			return {
-				...card,
+				...cardWithoutProcess,
 				title: title || card.title,
 				prompt,
 				startInPlanMode: Boolean(draft.startInPlanMode),
@@ -544,6 +577,7 @@ export function updateTask(board: BoardData, taskId: string, draft: TaskDraft): 
 							: undefined,
 				agentId: draft.agentId,
 				clineSettings: draft.clineSettings,
+				...(nextProcess ? { process: nextProcess } : {}),
 				baseRef,
 				updatedAt: Date.now(),
 			};
@@ -575,6 +609,7 @@ export function updateTaskTitle(
 		images: selection.card.images,
 		agentId: selection.card.agentId,
 		clineSettings: selection.card.clineSettings,
+		process: selection.card.process,
 		baseRef: selection.card.baseRef,
 	});
 }
@@ -606,6 +641,7 @@ export function applyTaskDetailClineSettingsSelection(
 		images: selection.card.images,
 		agentId: settings.agentId,
 		clineSettings: settings.clineSettings ?? undefined,
+		process: selection.card.process,
 		baseRef: selection.card.baseRef,
 	});
 }
@@ -664,8 +700,17 @@ export function disableTaskAutoReview(board: BoardData, taskId: string): { board
 		images: selection.card.images,
 		agentId: selection.card.agentId,
 		clineSettings: selection.card.clineSettings,
+		process: selection.card.process,
 		baseRef: selection.card.baseRef,
 	});
+}
+
+export function updateTaskProcess(
+	board: BoardData,
+	taskId: string,
+	process: TaskProcessState | null,
+): { board: BoardData; task: BoardCard | null; updated: boolean } {
+	return runtimeTaskState.updateTaskProcess(board, taskId, process);
 }
 
 export function removeTask(board: BoardData, taskId: string): { board: BoardData; removed: boolean } {
@@ -723,4 +768,8 @@ export function findCardSelection(board: BoardData, taskId: string): CardSelecti
 
 export function getTaskColumnId(board: BoardData, taskId: string): BoardColumnId | null {
 	return runtimeTaskState.getTaskColumnId(board, taskId);
+}
+
+export function getBlockingDependencyTaskIds(board: BoardData, taskId: string): string[] {
+	return runtimeTaskState.getBlockingDependencyTaskIds(board, taskId);
 }

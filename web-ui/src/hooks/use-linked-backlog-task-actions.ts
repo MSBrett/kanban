@@ -8,6 +8,7 @@ import {
 	findCardSelection,
 	moveTaskToColumn,
 	removeTaskDependency,
+	taskHasIncompleteProcess,
 	trashTaskAndGetReadyLinkedTaskIds,
 } from "@/state/board-state";
 import { trackTaskDependencyCreated, trackTasksAutoStartedFromDependency } from "@/telemetry/events";
@@ -104,6 +105,15 @@ export function useLinkedBacklogTaskActions({
 
 	const performMoveTaskToTrash = useCallback(
 		async (task: BoardCard, currentBoard?: BoardData): Promise<void> => {
+			if (taskHasIncompleteProcess(task)) {
+				showAppToast({
+					intent: "warning",
+					icon: "warning-sign",
+					message: "Process tasks must complete their process before moving to done.",
+					timeout: 6000,
+				});
+				return;
+			}
 			const boardBeforeTrash = currentBoard ?? boardRef.current;
 			const trashed = trashTaskAndGetReadyLinkedTaskIds(boardBeforeTrash, task.id);
 			if (!trashed.moved) {

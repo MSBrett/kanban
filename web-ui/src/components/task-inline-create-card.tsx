@@ -1,16 +1,18 @@
 import * as RadixCheckbox from "@radix-ui/react-checkbox";
+import { getTaskProcessDefinitions } from "@runtime-task-process";
 import { deriveTaskTitleFromPrompt } from "@runtime-task-title";
 import { ArrowBigUp, Check, Command, CornerDownLeft } from "lucide-react";
-import { type Dispatch, type ReactElement, type SetStateAction, useCallback, useRef, useState } from "react";
+import { type Dispatch, type ReactElement, type SetStateAction, useCallback, useMemo, useRef, useState } from "react";
 import { useHotkeys } from "react-hotkeys-hook";
 
 import { BranchSelectDropdown, type BranchSelectOption } from "@/components/branch-select-dropdown";
 import { TaskAgentModelPicker, useTaskAgentModelPicker } from "@/components/task-agent-model-picker";
+import { TaskProcessPanel } from "@/components/task-process-panel";
 import { TaskPromptComposer } from "@/components/task-prompt-composer";
 import { Button } from "@/components/ui/button";
 import { NativeSelect } from "@/components/ui/native-select";
 import type { RuntimeAgentId, RuntimeClineReasoningEffort, RuntimeTaskClineSettings } from "@/runtime/types";
-import type { TaskAutoReviewMode, TaskImage } from "@/types";
+import type { BoardCard, TaskAutoReviewMode, TaskImage, TaskProcessDefinition, TaskProcessVerdict } from "@/types";
 import { pasteShortcutLabel } from "@/utils/platform";
 import { useDocumentEvent, useMeasure } from "@/utils/react-use";
 
@@ -71,6 +73,13 @@ export function TaskInlineCreateCard({
 	onAgentIdChange,
 	clineSettings,
 	onClineSettingsChange,
+	processId,
+	onProcessIdChange,
+	processDefinitions,
+	processActionCard,
+	onAppendProcessNote,
+	onTaskProcessVerdict,
+	onRunProcessStage,
 	defaultAgentId,
 	defaultProviderId,
 	defaultModelId,
@@ -103,6 +112,20 @@ export function TaskInlineCreateCard({
 	onAgentIdChange?: (value: RuntimeAgentId | undefined) => void;
 	clineSettings?: RuntimeTaskClineSettings | undefined;
 	onClineSettingsChange?: (value: RuntimeTaskClineSettings | undefined) => void;
+	processId?: string | undefined;
+	onProcessIdChange?: (value: string | undefined) => void;
+	processDefinitions?: TaskProcessDefinition[];
+	processActionCard?: BoardCard | undefined;
+	onAppendProcessNote?: (taskId: string, notes: string, expectedStage: string, agent: string, model?: string) => void;
+	onTaskProcessVerdict?: (
+		taskId: string,
+		verdict: TaskProcessVerdict,
+		notes: string,
+		expectedStage: string,
+		agent: string,
+		model?: string,
+	) => void;
+	onRunProcessStage?: (taskId: string) => void;
 	/** Default agent ID from runtimeConfig.selectedAgentId, used to show "Default (AgentName)" in picker */
 	defaultAgentId?: RuntimeAgentId | null;
 	/** Default Cline provider ID from runtimeConfig.clineProviderSettings.providerId */
@@ -117,7 +140,9 @@ export function TaskInlineCreateCard({
 	const autoReviewEnabledId = `${idPrefix}-auto-review-enabled-toggle`;
 	const autoReviewModeId = `${idPrefix}-auto-review-mode-select`;
 	const branchSelectId = `${idPrefix}-branch-select`;
+	const processSelectId = `${idPrefix}-process-select`;
 	const actionLabel = mode === "edit" ? "Save" : "Create";
+	const processOptions = useMemo(() => getTaskProcessDefinitions(processDefinitions ?? []), [processDefinitions]);
 	const [measureRef, cardRect] = useMeasure<HTMLDivElement>();
 	const containerRef = useRef<HTMLDivElement | null>(null);
 	const [isBranchPopoverOpen, setIsBranchPopoverOpen] = useState(false);
@@ -273,6 +298,27 @@ export function TaskInlineCreateCard({
 					/>
 				</div>
 
+				{onProcessIdChange ? (
+					<div>
+						<span className="text-[11px] text-text-secondary block mb-1">Process</span>
+						<NativeSelect
+							id={processSelectId}
+							size="sm"
+							value={processId ?? ""}
+							onChange={(event) => onProcessIdChange(event.currentTarget.value || undefined)}
+							style={{ width: "100%" }}
+							disabled={!enabled}
+						>
+							<option value="">None</option>
+							{processOptions.map((definition) => (
+								<option key={definition.id} value={definition.id}>
+									{definition.name}
+								</option>
+							))}
+						</NativeSelect>
+					</div>
+				) : null}
+
 				<div className="flex items-center gap-2 flex-wrap">
 					<label
 						htmlFor={autoReviewEnabledId}
@@ -326,6 +372,15 @@ export function TaskInlineCreateCard({
 						defaultReasoningEffort={defaultReasoningEffort}
 						providerDefaultModels={providerDefaultModels}
 						onPopoverOpenChange={setIsModelPickerPopoverOpen}
+					/>
+				) : null}
+				{processActionCard ? (
+					<TaskProcessPanel
+						card={processActionCard}
+						onAppend={onAppendProcessNote}
+						onVerdict={onTaskProcessVerdict}
+						onRunStage={onRunProcessStage}
+						variant="inline"
 					/>
 				) : null}
 			</div>

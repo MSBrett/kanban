@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { createTRPCProxyClient, httpBatchLink } from "@trpc/client";
 import type { Command } from "commander";
 
@@ -8,21 +9,45 @@ import type {
 	RuntimeBoardDependency,
 	RuntimeClineReasoningEffort,
 	RuntimeTaskClineSettings,
+	RuntimeTaskProcessDefinition,
+	RuntimeTaskProcessState,
+	RuntimeTaskProcessVerdict,
 	RuntimeWorkspaceStateResponse,
 } from "../core/api-contract";
 import { runtimeAgentIdSchema, runtimeClineReasoningEffortSchema } from "../core/api-contract";
+import { resolveKanbanCommandLine } from "../core/kanban-command";
 import { buildKanbanRuntimeUrl, getKanbanRuntimeOrigin, getRuntimeFetch } from "../core/runtime-endpoint";
 import {
 	addTaskDependency,
 	addTaskToColumn,
 	deleteTasksFromBoard,
+	getBlockingDependencyTaskIds,
 	getTaskColumnId,
 	moveTaskToColumn,
 	type RuntimeAddTaskDependencyResult,
 	removeTaskDependency,
+	taskHasIncompleteProcess,
 	trashTaskAndGetReadyLinkedTaskIds,
 	updateTask,
+	updateTaskProcess,
 } from "../core/task-board-mutations";
+import {
+	advanceTaskProcessPastPassiveDispatchStages,
+	appendTaskProcessHistory,
+	assertLaunchableTaskProcessDefinitions,
+	assertTaskProcessStagePromptReady,
+	buildTaskProcessStagePrompt,
+	createTaskProcess,
+	getTaskProcessDefinition,
+	getTaskProcessDefinitions,
+	getTaskProcessProgress,
+	getTaskProcessStage,
+	isPassiveDispatchStage,
+	markTaskProcessRunning,
+	parseTaskProcessDefinitionsJson,
+	reopenTaskProcess,
+	transitionTaskProcess,
+} from "../core/task-process";
 import { resolveProjectInputPath } from "../projects/project-path";
 import { loadWorkspaceContext, mutateWorkspaceState } from "../state/workspace-state";
 import type { RuntimeAppRouter } from "../trpc/app-router";
@@ -106,6 +131,20 @@ function parseOptionalStringOrDefault(value: string | undefined): string | null 
 		return null;
 	}
 	return value;
+}
+
+function parseOptionalProcessId(value: string | undefined): string | null | undefined {
+	if (value === undefined) {
+		return undefined;
+	}
+	const trimmed = value.trim();
+	if (!trimmed) {
+		throw new Error("Process ID cannot be empty.");
+	}
+	if (trimmed === "none" || trimmed === "default") {
+		return null;
+	}
+	return trimmed;
 }
 
 type ParsedTaskClineReasoningEffort = RuntimeClineReasoningEffort | "default" | null | undefined;
@@ -337,6 +376,65 @@ function findTaskRecord(
 	return null;
 }
 
+function formatTaskProcessRecord(process: RuntimeBoardCard["process"]): JsonRecord | null {
+	if (!process) {
+		return null;
+	}
+	const progress = getTaskProcessProgress(process);
+	return {
+		id: process.processId,
+		name: process.processName ?? process.processId,
+		digest: process.processDigest ?? null,
+		stageId: process.stageId,
+		status: process.status,
+		lastVerdict: process.lastVerdict ?? null,
+		updatedAt: process.updatedAt,
+		progress: {
+			stages: progress.stages,
+			gatesPassed: progress.gatesPassed,
+			totalGates: progress.totalGates,
+			currentStageIndex: progress.currentStageIndex,
+			offPath: progress.offPath,
+			reworkOf: progress.reworkOf,
+			complete: progress.complete,
+		},
+		history: process.history.map((entry) => ({
+			stageId: entry.stageId,
+			targetStageId: entry.targetStageId ?? null,
+			recordKind: entry.recordKind ?? null,
+			verdict: entry.verdict ?? null,
+			agent: entry.agent ?? null,
+			model: entry.model ?? null,
+			notes: entry.notes ?? null,
+			at: entry.at,
+		})),
+	};
+}
+
+function getEffectiveReadyTaskProcessStageId(
+	process: RuntimeTaskProcessState,
+	definitions: readonly RuntimeTaskProcessDefinition[],
+): string {
+	if (process.status !== "ready") {
+		return process.stageId;
+	}
+	try {
+		return advanceTaskProcessPastPassiveDispatchStages(process, { definitions }).stageId;
+	} catch {
+		return process.stageId;
+	}
+}
+
+function formatTaskProcessDefinitionRecord(
+	definition: RuntimeTaskProcessDefinition,
+	customProcessIds: Set<string>,
+): JsonRecord {
+	return {
+		...definition,
+		source: customProcessIds.has(definition.id) ? "custom" : "built-in",
+	};
+}
+
 function formatTaskRecord(
 	state: RuntimeWorkspaceStateResponse,
 	task: RuntimeBoardCard,
@@ -353,6 +451,7 @@ function formatTaskRecord(
 		autoReviewMode: task.autoReviewMode ?? "commit",
 		...(task.agentId ? { agentId: task.agentId } : {}),
 		...formatTaskClineSettings(task.clineSettings),
+		process: formatTaskProcessRecord(task.process),
 		createdAt: task.createdAt,
 		updatedAt: task.updatedAt,
 		session: session
@@ -474,6 +573,7 @@ async function deleteTaskWorkspace(
 
 async function createTask(input: {
 	cwd: string;
+	taskId?: string;
 	title?: string;
 	prompt: string;
 	projectPath?: string;
@@ -483,6 +583,7 @@ async function createTask(input: {
 	autoReviewMode?: "commit" | "pr";
 	agentId?: RuntimeAgentId;
 	clineSettings?: RuntimeTaskClineSettings;
+	processId?: string;
 }): Promise<JsonRecord> {
 	const workspaceRepoPath = await resolveWorkspaceRepoPath(input.projectPath, input.cwd);
 	const workspaceId = await ensureRuntimeWorkspace(workspaceRepoPath);
@@ -496,6 +597,7 @@ async function createTask(input: {
 			state.board,
 			"backlog",
 			{
+				taskId: input.taskId,
 				title: input.title,
 				prompt: input.prompt,
 				startInPlanMode: input.startInPlanMode,
@@ -503,6 +605,7 @@ async function createTask(input: {
 				autoReviewMode: input.autoReviewMode,
 				agentId: input.agentId,
 				clineSettings: input.clineSettings,
+				processId: input.processId,
 				baseRef: resolvedBaseRef,
 			},
 			() => globalThis.crypto.randomUUID(),
@@ -527,6 +630,7 @@ async function createTask(input: {
 			autoReviewMode: created.autoReviewMode ?? "commit",
 			...(created.agentId ? { agentId: created.agentId } : {}),
 			...formatTaskClineSettings(created.clineSettings),
+			process: formatTaskProcessRecord(created.process),
 		},
 	};
 }
@@ -545,6 +649,7 @@ async function updateTaskCommand(input: {
 	clineProviderId?: string | null;
 	clineModelId?: string | null;
 	clineReasoningEffort?: ParsedTaskClineReasoningEffort;
+	processId?: string | null;
 }): Promise<JsonRecord> {
 	if (
 		input.title === undefined &&
@@ -556,7 +661,8 @@ async function updateTaskCommand(input: {
 		input.agentId === undefined &&
 		input.clineProviderId === undefined &&
 		input.clineModelId === undefined &&
-		input.clineReasoningEffort === undefined
+		input.clineReasoningEffort === undefined &&
+		input.processId === undefined
 	) {
 		throw new Error("task update requires at least one field to change.");
 	}
@@ -574,6 +680,14 @@ async function updateTaskCommand(input: {
 			modelId: input.clineModelId,
 			reasoningEffort: input.clineReasoningEffort,
 		});
+		const nextProcess =
+			input.processId === undefined
+				? undefined
+				: input.processId === null
+					? null
+					: taskRecord.task.process?.processId === input.processId
+						? taskRecord.task.process
+						: createTaskProcess(input.processId, Date.now(), runtimeState.board.processes ?? []);
 
 		const updatedTask = updateTask(runtimeState.board, input.taskId, {
 			title: input.title ?? taskRecord.task.title,
@@ -584,6 +698,7 @@ async function updateTaskCommand(input: {
 			autoReviewMode: input.autoReviewMode ?? taskRecord.task.autoReviewMode ?? "commit",
 			agentId: input.agentId,
 			clineSettings: nextTaskClineSettings,
+			process: nextProcess,
 		});
 		if (!updatedTask.updated || !updatedTask.task) {
 			throw new Error(`Task "${input.taskId}" could not be updated.`);
@@ -670,6 +785,790 @@ async function unlinkTasks(input: { cwd: string; dependencyId: string; projectPa
 	};
 }
 
+async function listTaskProcesses(input: { cwd: string; projectPath?: string }): Promise<JsonRecord> {
+	const workspace = await resolveRuntimeWorkspace(input.projectPath, input.cwd, {
+		autoCreateIfMissing: false,
+	});
+	const runtimeClient = createRuntimeTrpcClient(workspace.workspaceId);
+	const state = await runtimeClient.workspace.getState.query();
+	const customDefinitions = state.board.processes ?? [];
+	const customProcessIds = new Set(customDefinitions.map((definition) => definition.id));
+	const definitions = getTaskProcessDefinitions(customDefinitions);
+
+	return {
+		ok: true,
+		workspacePath: workspace.repoPath,
+		processes: definitions.map((definition) => formatTaskProcessDefinitionRecord(definition, customProcessIds)),
+		customProcesses: customDefinitions.map((definition) =>
+			formatTaskProcessDefinitionRecord(definition, customProcessIds),
+		),
+		count: definitions.length,
+		customCount: customDefinitions.length,
+	};
+}
+
+function countAssignedTaskProcesses(board: RuntimeWorkspaceStateResponse["board"], processId: string): number {
+	let count = 0;
+	for (const column of board.columns) {
+		for (const task of column.cards) {
+			if (task.process?.processId === processId) {
+				count += 1;
+			}
+		}
+	}
+	return count;
+}
+
+async function importTaskProcesses(input: {
+	cwd: string;
+	file: string;
+	projectPath?: string;
+	replace?: boolean;
+}): Promise<JsonRecord> {
+	const filePath = resolveProjectInputPath(input.file, input.cwd);
+	const importedDefinitions = parseTaskProcessDefinitionsJson(await readFile(filePath, "utf8"));
+	assertLaunchableTaskProcessDefinitions(importedDefinitions);
+	const workspaceRepoPath = await resolveWorkspaceRepoPath(input.projectPath, input.cwd);
+	const workspaceId = await ensureRuntimeWorkspace(workspaceRepoPath);
+	const runtimeClient = createRuntimeTrpcClient(workspaceId);
+	const imported = await updateRuntimeWorkspaceState(runtimeClient, workspaceRepoPath, (runtimeState) => {
+		const byId = new Map<string, RuntimeTaskProcessDefinition>();
+		const existingDefinitions = runtimeState.board.processes ?? [];
+		if (!input.replace) {
+			for (const definition of existingDefinitions) {
+				byId.set(definition.id, definition);
+			}
+		}
+		for (const definition of importedDefinitions) {
+			byId.set(definition.id, definition);
+		}
+		const nextProcesses = Array.from(byId.values());
+		if (input.replace) {
+			const nextProcessIds = new Set(nextProcesses.map((definition) => definition.id));
+			for (const definition of existingDefinitions) {
+				if (nextProcessIds.has(definition.id)) {
+					continue;
+				}
+				const assignedCount = countAssignedTaskProcesses(runtimeState.board, definition.id);
+				if (assignedCount > 0) {
+					throw new Error(
+						`Custom process "${definition.id}" is assigned to ${assignedCount} task${assignedCount === 1 ? "" : "s"} and cannot be removed by --replace.`,
+					);
+				}
+			}
+		}
+		return {
+			board: {
+				...runtimeState.board,
+				processes: nextProcesses,
+			},
+			value: nextProcesses,
+		};
+	});
+	const customProcessIds = new Set(imported.map((definition) => definition.id));
+
+	return {
+		ok: true,
+		workspacePath: workspaceRepoPath,
+		importedProcessIds: importedDefinitions.map((definition) => definition.id),
+		replaced: input.replace === true,
+		customProcesses: imported.map((definition) => formatTaskProcessDefinitionRecord(definition, customProcessIds)),
+		customCount: imported.length,
+	};
+}
+
+async function exportTaskProcess(input: { cwd: string; processId: string; projectPath?: string }): Promise<JsonRecord> {
+	const processId = input.processId.trim();
+	if (!processId) {
+		throw new Error("Process ID cannot be empty.");
+	}
+	const workspace = await resolveRuntimeWorkspace(input.projectPath, input.cwd, {
+		autoCreateIfMissing: false,
+	});
+	const runtimeClient = createRuntimeTrpcClient(workspace.workspaceId);
+	const state = await runtimeClient.workspace.getState.query();
+	const customProcessIds = new Set((state.board.processes ?? []).map((definition) => definition.id));
+	const definition = getTaskProcessDefinitions(state.board.processes ?? []).find(
+		(candidate) => candidate.id === processId,
+	);
+	if (!definition) {
+		throw new Error(`Process "${processId}" was not found in workspace ${workspace.repoPath}.`);
+	}
+
+	return {
+		ok: true,
+		workspacePath: workspace.repoPath,
+		process: formatTaskProcessDefinitionRecord(definition, customProcessIds),
+		definition,
+	};
+}
+
+async function removeTaskProcess(input: { cwd: string; processId: string; projectPath?: string }): Promise<JsonRecord> {
+	const processId = input.processId.trim();
+	if (!processId) {
+		throw new Error("Process ID cannot be empty.");
+	}
+	const workspaceRepoPath = await resolveWorkspaceRepoPath(input.projectPath, input.cwd);
+	const workspaceId = await ensureRuntimeWorkspace(workspaceRepoPath);
+	const runtimeClient = createRuntimeTrpcClient(workspaceId);
+	const removed = await updateRuntimeWorkspaceState(runtimeClient, workspaceRepoPath, (runtimeState) => {
+		const existingDefinitions = runtimeState.board.processes ?? [];
+		const nextProcesses = existingDefinitions.filter((definition) => definition.id !== processId);
+		if (nextProcesses.length === existingDefinitions.length) {
+			throw new Error(`Custom process "${processId}" was not found in workspace ${workspaceRepoPath}.`);
+		}
+		const assignedCount = countAssignedTaskProcesses(runtimeState.board, processId);
+		if (assignedCount > 0) {
+			throw new Error(
+				`Custom process "${processId}" is assigned to ${assignedCount} task${assignedCount === 1 ? "" : "s"} and cannot be removed.`,
+			);
+		}
+		return {
+			board: {
+				...runtimeState.board,
+				processes: nextProcesses,
+			},
+			value: nextProcesses,
+		};
+	});
+	const customProcessIds = new Set(removed.map((definition) => definition.id));
+
+	return {
+		ok: true,
+		workspacePath: workspaceRepoPath,
+		removedProcessId: processId,
+		customProcesses: removed.map((definition) => formatTaskProcessDefinitionRecord(definition, customProcessIds)),
+		customCount: removed.length,
+	};
+}
+
+function isDoneColumn(columnId: RuntimeBoardColumnId): boolean {
+	return columnId === "trash";
+}
+
+function buildTaskProcessStatusSummary(
+	tasks: Array<{
+		task: RuntimeBoardCard;
+		columnId: RuntimeBoardColumnId;
+		blocked: boolean;
+		ready: boolean;
+		readyStageId: string;
+	}>,
+): JsonRecord {
+	const byProcess: Record<string, number> = {};
+	const byStage: Record<string, number> = {};
+	const byStatus: Record<string, number> = {};
+	let readyCount = 0;
+	let blockedCount = 0;
+	for (const entry of tasks) {
+		const process = entry.task.process;
+		if (!process) {
+			continue;
+		}
+		byProcess[process.processId] = (byProcess[process.processId] ?? 0) + 1;
+		byStage[process.stageId] = (byStage[process.stageId] ?? 0) + 1;
+		byStatus[process.status] = (byStatus[process.status] ?? 0) + 1;
+		if (entry.ready) {
+			readyCount += 1;
+		}
+		if (entry.blocked) {
+			blockedCount += 1;
+		}
+	}
+	return {
+		total: tasks.length,
+		ready: readyCount,
+		blocked: blockedCount,
+		byProcess,
+		byStage,
+		byStatus,
+	};
+}
+
+async function getTaskProcessStatus(input: {
+	cwd: string;
+	projectPath?: string;
+	processId?: string;
+	stage?: string;
+	readyStage?: string;
+	ready?: boolean;
+	blocked?: boolean;
+	includeDone?: boolean;
+	summary?: boolean;
+}): Promise<JsonRecord> {
+	const workspace = await resolveRuntimeWorkspace(input.projectPath, input.cwd, {
+		autoCreateIfMissing: false,
+	});
+	const runtimeClient = createRuntimeTrpcClient(workspace.workspaceId);
+	const state = await runtimeClient.workspace.getState.query();
+	const processId = input.processId?.trim() || null;
+	const stage = input.stage?.trim() || null;
+	const readyStage = input.readyStage?.trim() || null;
+	const definitions = state.board.processes ?? [];
+	const statusEntries = state.board.columns.flatMap((column) =>
+		column.cards.flatMap((task) => {
+			if (!task.process) {
+				return [];
+			}
+			if (!input.includeDone && isDoneColumn(column.id)) {
+				return [];
+			}
+			if (processId && task.process.processId !== processId) {
+				return [];
+			}
+			const blocked = getBlockingDependencyTaskIds(state.board, task.id).length > 0;
+			const ready = task.process.status === "ready" && !blocked && !isDoneColumn(column.id);
+			const readyStageId = getEffectiveReadyTaskProcessStageId(task.process, definitions);
+			if (stage && task.process.stageId !== stage) {
+				return [];
+			}
+			if (readyStage && readyStageId !== readyStage) {
+				return [];
+			}
+			if (input.ready !== undefined && ready !== input.ready) {
+				return [];
+			}
+			if (input.blocked !== undefined && blocked !== input.blocked) {
+				return [];
+			}
+			return [
+				{
+					task,
+					columnId: column.id,
+					ready,
+					readyStageId,
+					blocked,
+				},
+			];
+		}),
+	);
+	const tasks = statusEntries.map(({ task, columnId, ready, readyStageId, blocked }) => {
+		const processRecord = formatTaskProcessRecord(task.process);
+		return {
+			...formatTaskRecord(state, task, columnId),
+			process: processRecord ? { ...processRecord, readyStageId } : null,
+			ready,
+			blocked,
+		};
+	});
+	const summary = buildTaskProcessStatusSummary(statusEntries);
+	return {
+		ok: true,
+		workspacePath: workspace.repoPath,
+		process: processId,
+		stage,
+		ready: input.ready ?? null,
+		blocked: input.blocked ?? null,
+		includeDone: input.includeDone === true,
+		tasks,
+		count: tasks.length,
+		...(input.summary ? { summary } : {}),
+	};
+}
+
+async function getTaskProcessHistory(input: {
+	cwd: string;
+	taskId: string;
+	projectPath?: string;
+	processId?: string;
+}): Promise<JsonRecord> {
+	const workspace = await resolveRuntimeWorkspace(input.projectPath, input.cwd, {
+		autoCreateIfMissing: false,
+	});
+	const runtimeClient = createRuntimeTrpcClient(workspace.workspaceId);
+	const state = await runtimeClient.workspace.getState.query();
+	const taskRecord = findTaskRecord(state, input.taskId);
+	if (!taskRecord) {
+		throw new Error(`Task "${input.taskId}" was not found in workspace ${workspace.repoPath}.`);
+	}
+	if (!taskRecord.task.process) {
+		throw new Error(`Task "${input.taskId}" does not have a process assigned.`);
+	}
+	const processId = input.processId?.trim();
+	if (processId && taskRecord.task.process.processId !== processId) {
+		throw new Error(
+			`Task "${input.taskId}" is assigned to process "${taskRecord.task.process.processId}", expected "${processId}".`,
+		);
+	}
+	const process = formatTaskProcessRecord(taskRecord.task.process);
+	return {
+		ok: true,
+		workspacePath: workspace.repoPath,
+		task: formatTaskRecord(state, taskRecord.task, taskRecord.columnId),
+		process,
+		history: (process?.history as unknown[]) ?? [],
+		count: taskRecord.task.process.history.length,
+	};
+}
+
+async function getTaskProcessBody(input: {
+	cwd: string;
+	taskId: string;
+	projectPath?: string;
+	processId?: string;
+}): Promise<JsonRecord> {
+	const workspace = await resolveRuntimeWorkspace(input.projectPath, input.cwd, {
+		autoCreateIfMissing: false,
+	});
+	const runtimeClient = createRuntimeTrpcClient(workspace.workspaceId);
+	const state = await runtimeClient.workspace.getState.query();
+	const taskRecord = findTaskRecord(state, input.taskId);
+	if (!taskRecord) {
+		throw new Error(`Task "${input.taskId}" was not found in workspace ${workspace.repoPath}.`);
+	}
+	if (!taskRecord.task.process) {
+		throw new Error(`Task "${input.taskId}" does not have a process assigned.`);
+	}
+	const processId = input.processId?.trim();
+	if (processId && taskRecord.task.process.processId !== processId) {
+		throw new Error(
+			`Task "${input.taskId}" is assigned to process "${taskRecord.task.process.processId}", expected "${processId}".`,
+		);
+	}
+	return {
+		ok: true,
+		workspacePath: workspace.repoPath,
+		task: formatTaskRecord(state, taskRecord.task, taskRecord.columnId),
+		process: formatTaskProcessRecord(taskRecord.task.process),
+		body: taskRecord.task.prompt,
+	};
+}
+
+async function reopenTaskProcessCommand(input: {
+	cwd: string;
+	taskId: string;
+	notes: string;
+	projectPath?: string;
+	processId?: string;
+	agent?: string;
+	model?: string;
+	expectedStage?: string;
+}): Promise<JsonRecord> {
+	const notes = input.notes.trim();
+	if (!notes) {
+		throw new Error("Process reopen notes are required.");
+	}
+	const agent = input.agent?.trim();
+	if (!agent) {
+		throw new Error("Process reopen agent is required.");
+	}
+	const expectedStage = input.expectedStage?.trim();
+	const processId = input.processId?.trim();
+	const workspaceRepoPath = await resolveWorkspaceRepoPath(input.projectPath, input.cwd);
+	const workspaceId = await ensureRuntimeWorkspace(workspaceRepoPath);
+	const runtimeClient = createRuntimeTrpcClient(workspaceId);
+	const mutation = await updateRuntimeWorkspaceState(runtimeClient, workspaceRepoPath, (runtimeState) => {
+		const taskRecord = findTaskRecord(runtimeState, input.taskId);
+		if (!taskRecord) {
+			throw new Error(`Task "${input.taskId}" was not found in workspace ${workspaceRepoPath}.`);
+		}
+		const process = taskRecord.task.process;
+		if (!process) {
+			throw new Error(`Task "${input.taskId}" does not have a process assigned.`);
+		}
+		if (processId && process.processId !== processId) {
+			throw new Error(
+				`Task "${input.taskId}" is assigned to process "${process.processId}", expected "${processId}".`,
+			);
+		}
+		if (expectedStage && process.stageId !== expectedStage) {
+			throw new Error(
+				`Task "${input.taskId}" is at process stage "${process.stageId}", expected "${expectedStage}".`,
+			);
+		}
+		const model = input.model?.trim();
+		const nextProcess = reopenTaskProcess(process, {
+			notes,
+			definitions: runtimeState.board.processes ?? [],
+			agent,
+			...(model ? { model } : {}),
+		});
+		const updatedProcess = updateTaskProcess(runtimeState.board, input.taskId, nextProcess);
+		if (!updatedProcess.updated || !updatedProcess.task) {
+			throw new Error(`Task "${input.taskId}" process could not be reopened.`);
+		}
+		const moved =
+			taskRecord.columnId === "backlog"
+				? {
+						board: updatedProcess.board,
+						task: updatedProcess.task,
+						fromColumnId: taskRecord.columnId,
+						moved: false,
+					}
+				: moveTaskToColumn(updatedProcess.board, input.taskId, "backlog");
+		if (!moved.task) {
+			throw new Error(`Task "${input.taskId}" could not be moved to backlog.`);
+		}
+		const nextState: RuntimeWorkspaceStateResponse = {
+			...runtimeState,
+			board: moved.board,
+		};
+		return {
+			board: moved.board,
+			value: {
+				task: formatTaskRecord(nextState, moved.task, "backlog"),
+				process: formatTaskProcessRecord(moved.task.process),
+				previousColumnId: taskRecord.columnId,
+				movedToBacklog: moved.moved,
+			},
+		};
+	});
+
+	if (columnCanHaveLiveTaskSession(mutation.previousColumnId as ListTaskColumn)) {
+		await stopTaskRuntimeSession(runtimeClient, input.taskId);
+	}
+
+	return {
+		ok: true,
+		workspacePath: workspaceRepoPath,
+		task: mutation.task,
+		process: mutation.process,
+		previousColumnId: mutation.previousColumnId,
+		movedToBacklog: mutation.movedToBacklog,
+	};
+}
+
+type TaskProcessAction = "append" | RuntimeTaskProcessVerdict;
+
+interface TaskProcessStageLaunch {
+	taskId: string;
+	prompt: string;
+	taskTitle: string;
+	startInPlanMode: false;
+	baseRef: string;
+	process: RuntimeTaskProcessState;
+	stageId: string;
+	agentId?: RuntimeAgentId;
+	clineSettings?: RuntimeTaskClineSettings;
+}
+
+interface TaskProcessStageHandoff extends TaskProcessStageLaunch {
+	fromColumnId: RuntimeBoardColumnId;
+}
+
+function buildTaskProcessStageLaunch(input: {
+	task: RuntimeBoardCard;
+	process: RuntimeTaskProcessState;
+	definitions: readonly RuntimeTaskProcessDefinition[];
+	workspacePath: string;
+	now?: number;
+}): TaskProcessStageLaunch | null {
+	if (input.process.status !== "ready") {
+		return null;
+	}
+	const dispatchReadyProcess = advanceTaskProcessPastPassiveDispatchStages(input.process, {
+		definitions: input.definitions,
+		now: input.now,
+	});
+	const stage = getTaskProcessStage(dispatchReadyProcess, input.definitions);
+	if (!stage || stage.terminal) {
+		return null;
+	}
+	const runningProcess =
+		dispatchReadyProcess.status === "running"
+			? dispatchReadyProcess
+			: markTaskProcessRunning(dispatchReadyProcess, {
+					now: input.now,
+					agent: "kanban",
+					notes: `Started ${stage.id} stage.`,
+				});
+	const prompt = buildTaskProcessStagePrompt({
+		taskId: input.task.id,
+		taskTitle: input.task.title,
+		taskPrompt: input.task.prompt,
+		process: runningProcess,
+		definitions: input.definitions,
+		workspacePath: input.workspacePath,
+		kanbanCommand: resolveKanbanCommandLine(),
+	});
+	const agentId = stage.agentId ?? input.task.agentId;
+	return {
+		taskId: input.task.id,
+		prompt,
+		taskTitle: input.task.title,
+		startInPlanMode: false,
+		baseRef: input.task.baseRef,
+		process: runningProcess,
+		stageId: stage.id,
+		...(agentId ? { agentId } : {}),
+		...(input.task.clineSettings ? { clineSettings: input.task.clineSettings } : {}),
+	};
+}
+
+async function updateTaskProcessCommand(input: {
+	cwd: string;
+	action: TaskProcessAction;
+	taskId: string;
+	notes: string;
+	projectPath?: string;
+	processId?: string;
+	agent?: string;
+	model?: string;
+	expectedStage?: string;
+}): Promise<JsonRecord> {
+	const notes = input.notes.trim();
+	if (!notes) {
+		throw new Error("Process notes are required.");
+	}
+	const expectedStage = input.expectedStage?.trim();
+	const processId = input.processId?.trim();
+	const workspaceRepoPath = await resolveWorkspaceRepoPath(input.projectPath, input.cwd);
+	const workspaceId = await ensureRuntimeWorkspace(workspaceRepoPath);
+	const runtimeClient = createRuntimeTrpcClient(workspaceId);
+	const mutation = await updateRuntimeWorkspaceState(runtimeClient, workspaceRepoPath, (runtimeState) => {
+		const taskRecord = findTaskRecord(runtimeState, input.taskId);
+		if (!taskRecord) {
+			throw new Error(`Task "${input.taskId}" was not found in workspace ${workspaceRepoPath}.`);
+		}
+		const process = taskRecord.task.process;
+		if (!process) {
+			throw new Error(`Task "${input.taskId}" does not have a process assigned.`);
+		}
+		if (processId && process.processId !== processId) {
+			throw new Error(
+				`Task "${input.taskId}" is assigned to process "${process.processId}", expected "${processId}".`,
+			);
+		}
+		if (expectedStage && process.stageId !== expectedStage) {
+			throw new Error(
+				`Task "${input.taskId}" is at process stage "${process.stageId}", expected "${expectedStage}".`,
+			);
+		}
+		const definitions = runtimeState.board.processes ?? [];
+		if (input.action === "append" && !expectedStage) {
+			throw new Error(`Task "${input.taskId}" process append requires --expected-stage ${process.stageId}.`);
+		}
+		if (!expectedStage && input.action !== "append") {
+			const definition = getTaskProcessDefinition(process, definitions);
+			if (definition && process.stageId !== definition.initial) {
+				throw new Error(
+					`Task "${input.taskId}" is at process stage "${process.stageId}". Provide --expected-stage ${process.stageId} before running task process ${input.action}.`,
+				);
+			}
+		}
+		const stage = getTaskProcessStage(process, definitions);
+		if (input.action !== "append") {
+			assertTaskProcessStagePromptReady(process, definitions);
+		}
+		const agent = input.agent?.trim() || stage?.role || stage?.id || process.stageId;
+		const model = input.model?.trim();
+		const processForAction =
+			input.action !== "append" &&
+			expectedStage &&
+			process.status !== "running" &&
+			stage &&
+			!isPassiveDispatchStage(stage)
+				? markTaskProcessRunning(process, {
+						agent,
+						...(model ? { model } : {}),
+						notes: `Accepted guarded CLI verdict for ${process.stageId}.`,
+					})
+				: process;
+		const nextProcess =
+			input.action === "append"
+				? appendTaskProcessHistory(processForAction, {
+						notes,
+						agent,
+						...(model ? { model } : {}),
+					})
+				: transitionTaskProcess(processForAction, input.action, {
+						notes,
+						definitions,
+						agent,
+						...(model ? { model } : {}),
+					});
+		let processToPersist = nextProcess;
+		let handoff: TaskProcessStageHandoff | null = null;
+		let handoffError: JsonRecord | null = null;
+		if (input.action !== "append" && (taskRecord.columnId === "in_progress" || taskRecord.columnId === "review")) {
+			try {
+				const handoffLaunch = buildTaskProcessStageLaunch({
+					task: taskRecord.task,
+					process: nextProcess,
+					definitions,
+					workspacePath: workspaceRepoPath,
+				});
+				handoff = handoffLaunch ? { ...handoffLaunch, fromColumnId: taskRecord.columnId } : null;
+			} catch (error) {
+				const handoffErrorMessage = error instanceof Error ? error.message : String(error);
+				handoffError = {
+					ok: false,
+					stageId: nextProcess.stageId,
+					error: handoffErrorMessage,
+				};
+				processToPersist = appendTaskProcessHistory(nextProcess, {
+					agent: "kanban",
+					recordKind: "append",
+					notes: `Stage handoff failed: ${handoffErrorMessage}`,
+				});
+			}
+		}
+		const updated = updateTaskProcess(runtimeState.board, input.taskId, processToPersist);
+		if (!updated.updated || !updated.task) {
+			throw new Error(`Task "${input.taskId}" process could not be updated.`);
+		}
+		const nextState: RuntimeWorkspaceStateResponse = {
+			...runtimeState,
+			board: updated.board,
+		};
+		return {
+			board: updated.board,
+			value: {
+				task: formatTaskRecord(nextState, updated.task, taskRecord.columnId),
+				process: formatTaskProcessRecord(updated.task.process),
+				completed: processToPersist.status === "complete",
+				readyProcess: {
+					stageId: processToPersist.stageId,
+					status: processToPersist.status,
+					updatedAt: processToPersist.updatedAt,
+				},
+				handoff,
+				handoffError,
+			},
+		};
+	});
+
+	let completion: TrashTaskExecutionResult | null = null;
+	if (mutation.completed) {
+		completion = await trashTaskById({
+			cwd: input.cwd,
+			taskId: input.taskId,
+			projectPath: input.projectPath,
+			workspaceRepoPath,
+			runtimeClient,
+		});
+	}
+	let responseTask = mutation.task;
+	let responseProcess = mutation.process;
+	let handoffResponse: JsonRecord | null = mutation.handoffError ?? null;
+	if (!completion && mutation.handoff) {
+		const handoff = mutation.handoff;
+		const started = await runtimeClient.runtime.startTaskSession.mutate({
+			taskId: handoff.taskId,
+			prompt: handoff.prompt,
+			taskTitle: handoff.taskTitle,
+			startInPlanMode: handoff.startInPlanMode,
+			baseRef: handoff.baseRef,
+			replaceActive: true,
+			agentId: handoff.agentId,
+			clineSettings: handoff.clineSettings,
+		});
+		if (!started.ok || !started.summary) {
+			const handoffErrorMessage = started.error ?? "Could not queue next process stage.";
+			handoffResponse = {
+				ok: false,
+				stageId: handoff.stageId,
+				error: handoffErrorMessage,
+			};
+			const handoffFailureState = await updateRuntimeWorkspaceState(
+				runtimeClient,
+				workspaceRepoPath,
+				(runtimeState) => {
+					const taskRecord = findTaskRecord(runtimeState, input.taskId);
+					if (!taskRecord?.task.process) {
+						throw new Error(`Task "${input.taskId}" process could not be resolved after failed handoff.`);
+					}
+					if (
+						taskRecord.task.process.stageId !== mutation.readyProcess.stageId ||
+						taskRecord.task.process.status !== mutation.readyProcess.status ||
+						taskRecord.task.process.updatedAt !== mutation.readyProcess.updatedAt
+					) {
+						throw new Error(`Task "${input.taskId}" process changed before failed handoff could be recorded.`);
+					}
+					const processWithHandoffFailure = appendTaskProcessHistory(taskRecord.task.process, {
+						agent: "kanban",
+						recordKind: "append",
+						notes: `Stage handoff failed: ${handoffErrorMessage}`,
+					});
+					const updated = updateTaskProcess(runtimeState.board, input.taskId, processWithHandoffFailure);
+					if (!updated.updated || !updated.task) {
+						throw new Error(`Task "${input.taskId}" failed handoff process note could not be recorded.`);
+					}
+					const nextState: RuntimeWorkspaceStateResponse = {
+						...runtimeState,
+						board: updated.board,
+					};
+					return {
+						board: updated.board,
+						value: {
+							task: formatTaskRecord(nextState, updated.task, taskRecord.columnId),
+							process: formatTaskProcessRecord(updated.task.process),
+						},
+					};
+				},
+			);
+			responseTask = handoffFailureState.task;
+			responseProcess = handoffFailureState.process;
+		} else {
+			const handoffState = await updateRuntimeWorkspaceState(runtimeClient, workspaceRepoPath, (runtimeState) => {
+				const taskRecord = findTaskRecord(runtimeState, input.taskId);
+				if (!taskRecord?.task.process) {
+					throw new Error(`Task "${input.taskId}" process could not be resolved after handoff.`);
+				}
+				if (
+					taskRecord.task.process.stageId !== mutation.readyProcess.stageId ||
+					taskRecord.task.process.status !== mutation.readyProcess.status ||
+					taskRecord.task.process.updatedAt !== mutation.readyProcess.updatedAt
+				) {
+					throw new Error(`Task "${input.taskId}" process changed before handoff could be recorded.`);
+				}
+				const updated = updateTaskProcess(runtimeState.board, input.taskId, handoff.process);
+				if (!updated.updated || !updated.task) {
+					throw new Error(`Task "${input.taskId}" handoff process could not be recorded.`);
+				}
+				if (taskRecord.columnId !== handoff.fromColumnId) {
+					throw new Error(`Task "${input.taskId}" moved before handoff could be recorded.`);
+				}
+				let handoffBoard = updated.board;
+				let handoffTask = updated.task;
+				let responseColumnId: RuntimeBoardColumnId = taskRecord.columnId;
+				if (handoff.fromColumnId === "review") {
+					const moved = moveTaskToColumn(updated.board, input.taskId, "in_progress");
+					if (!moved.moved || !moved.task) {
+						throw new Error(`Task "${input.taskId}" could not be moved to in_progress after handoff.`);
+					}
+					handoffBoard = moved.board;
+					handoffTask = moved.task;
+					responseColumnId = "in_progress";
+				}
+				const nextState: RuntimeWorkspaceStateResponse = {
+					...runtimeState,
+					board: handoffBoard,
+				};
+				return {
+					board: handoffBoard,
+					value: {
+						task: formatTaskRecord(nextState, handoffTask, responseColumnId),
+						process: formatTaskProcessRecord(handoffTask.process),
+					},
+				};
+			});
+			responseTask = handoffState.task;
+			responseProcess = handoffState.process;
+			handoffResponse = {
+				ok: true,
+				stageId: handoff.stageId,
+				summary: started.summary,
+			};
+		}
+	}
+
+	return {
+		ok: true,
+		workspacePath: workspaceRepoPath,
+		action: input.action,
+		task: completion?.task ?? responseTask,
+		process: completion?.task.process ?? responseProcess,
+		completed: mutation.completed,
+		movedToDone: completion ? !completion.alreadyInTrash : false,
+		handoff: handoffResponse,
+		readyTaskIds: completion?.readyTaskIds ?? [],
+		autoStartedTasks: completion?.autoStartedTasks ?? [],
+		worktreeDeleted: completion?.worktreeDeleted ?? false,
+		worktreeDeleteError: completion?.worktreeDeleteError,
+	};
+}
+
 async function startTask(input: { cwd: string; taskId: string; projectPath?: string }): Promise<JsonRecord> {
 	const workspaceRepoPath = await resolveWorkspaceRepoPath(input.projectPath, input.cwd);
 	const workspaceId = await ensureRuntimeWorkspace(workspaceRepoPath);
@@ -680,20 +1579,50 @@ async function startTask(input: { cwd: string; taskId: string; projectPath?: str
 		throw new Error(`Task "${input.taskId}" was not found in workspace ${workspaceRepoPath}.`);
 	}
 
-	if (fromColumnId !== "backlog" && fromColumnId !== "in_progress") {
-		throw new Error(
-			`Task "${input.taskId}" is in "${fromColumnId}" and can only be started from backlog or in_progress.`,
-		);
-	}
-
 	const currentRecord = findTaskRecord(runtimeState, input.taskId);
 	const task = currentRecord?.task;
 	if (!task) {
 		throw new Error(`Task "${input.taskId}" could not be resolved.`);
 	}
 
+	const canStartFromColumn =
+		fromColumnId === "backlog" ||
+		fromColumnId === "in_progress" ||
+		(fromColumnId === "review" && task.process?.status === "ready");
+	if (!canStartFromColumn) {
+		throw new Error(
+			`Task "${input.taskId}" is in "${fromColumnId}" and can only be started from backlog, in_progress, or review when a process stage is ready.`,
+		);
+	}
+	if (fromColumnId === "backlog") {
+		const blockingTaskIds = getBlockingDependencyTaskIds(runtimeState.board, input.taskId);
+		if (blockingTaskIds.length > 0) {
+			throw new Error(
+				`Task "${input.taskId}" is blocked by unfinished dependency task${blockingTaskIds.length === 1 ? "" : "s"}: ${blockingTaskIds.join(", ")}.`,
+			);
+		}
+	}
+
 	const existingSession = runtimeState.sessions[task.id] ?? null;
-	const shouldStartSession = !existingSession || existingSession.state !== "running";
+	const processLaunch = task.process
+		? buildTaskProcessStageLaunch({
+				task,
+				process: task.process,
+				definitions: runtimeState.board.processes ?? [],
+				workspacePath: workspaceRepoPath,
+			})
+		: null;
+	const shouldStartSession = Boolean(processLaunch) || !existingSession || existingSession.state !== "running";
+	const taskForSession = processLaunch
+		? {
+				...task,
+				prompt: processLaunch.prompt,
+				startInPlanMode: processLaunch.startInPlanMode,
+				agentId: processLaunch.agentId,
+				clineSettings: processLaunch.clineSettings,
+				process: processLaunch.process,
+			}
+		: task;
 
 	if (shouldStartSession) {
 		const ensured = await runtimeClient.workspace.ensureWorktree.mutate({
@@ -706,12 +1635,13 @@ async function startTask(input: { cwd: string; taskId: string; projectPath?: str
 
 		const started = await runtimeClient.runtime.startTaskSession.mutate({
 			taskId: task.id,
-			prompt: task.prompt,
-			taskTitle: task.title,
-			startInPlanMode: task.startInPlanMode,
+			prompt: taskForSession.prompt,
+			taskTitle: taskForSession.title,
+			startInPlanMode: taskForSession.startInPlanMode,
 			baseRef: task.baseRef,
-			agentId: task.agentId,
-			clineSettings: task.clineSettings,
+			agentId: taskForSession.agentId,
+			clineSettings: taskForSession.clineSettings,
+			replaceActive: Boolean(processLaunch),
 		});
 		if (!started.ok || !started.summary) {
 			throw new Error(started.error ?? "Could not start task session.");
@@ -724,13 +1654,21 @@ async function startTask(input: { cwd: string; taskId: string; projectPath?: str
 			throw new Error(`Task "${input.taskId}" could not be resolved.`);
 		}
 		if (!movement.moved) {
+			const board =
+				processLaunch && movement.task.process?.updatedAt === task.process?.updatedAt
+					? updateTaskProcess(latestState.board, input.taskId, processLaunch.process).board
+					: latestState.board;
 			return {
-				board: latestState.board,
+				board,
 				value: movement,
 			};
 		}
+		const board =
+			processLaunch && movement.task.process?.updatedAt === task.process?.updatedAt
+				? updateTaskProcess(movement.board, input.taskId, processLaunch.process).board
+				: movement.board;
 		return {
-			board: movement.board,
+			board,
 			value: movement,
 		};
 	});
@@ -741,9 +1679,12 @@ async function startTask(input: { cwd: string; taskId: string; projectPath?: str
 			message: `Task "${input.taskId}" is already in progress.`,
 			task: {
 				id: task.id,
-				prompt: task.prompt,
+				prompt: taskForSession.prompt,
 				column: "in_progress",
 				workspacePath: workspaceRepoPath,
+				process: processLaunch
+					? formatTaskProcessRecord(processLaunch.process)
+					: formatTaskProcessRecord(task.process),
 			},
 		};
 	}
@@ -752,10 +1693,73 @@ async function startTask(input: { cwd: string; taskId: string; projectPath?: str
 		ok: true,
 		task: {
 			id: task.id,
-			prompt: task.prompt,
+			prompt: taskForSession.prompt,
 			column: "in_progress",
 			workspacePath: workspaceRepoPath,
+			process: processLaunch
+				? formatTaskProcessRecord(processLaunch.process)
+				: formatTaskProcessRecord(task.process),
 		},
+	};
+}
+
+async function runReadyTaskProcessStages(input: {
+	cwd: string;
+	projectPath?: string;
+	processId?: string;
+	stage?: string;
+}): Promise<JsonRecord> {
+	const workspaceRepoPath = await resolveWorkspaceRepoPath(input.projectPath, input.cwd);
+	const workspaceId = await ensureRuntimeWorkspace(workspaceRepoPath);
+	const runtimeClient = createRuntimeTrpcClient(workspaceId);
+	const runtimeState = await runtimeClient.workspace.getState.query();
+	const processId = input.processId?.trim() || null;
+	const stage = input.stage?.trim() || null;
+	const definitions = runtimeState.board.processes ?? [];
+	const taskIds: string[] = [];
+
+	for (const column of runtimeState.board.columns) {
+		if (column.id === "trash") {
+			continue;
+		}
+		for (const task of column.cards) {
+			if (!task.process || task.process.status !== "ready") {
+				continue;
+			}
+			if (processId && task.process.processId !== processId) {
+				continue;
+			}
+			const readyStageId = getEffectiveReadyTaskProcessStageId(task.process, definitions);
+			if (stage && task.process.stageId !== stage && readyStageId !== stage) {
+				continue;
+			}
+			if (getBlockingDependencyTaskIds(runtimeState.board, task.id).length > 0) {
+				continue;
+			}
+			taskIds.push(task.id);
+		}
+	}
+
+	const startedTasks: unknown[] = [];
+	for (const taskId of taskIds) {
+		const started = await startTask({
+			cwd: input.cwd,
+			taskId,
+			projectPath: workspaceRepoPath,
+		});
+		startedTasks.push(started.task ?? started);
+	}
+
+	return {
+		ok: true,
+		workspacePath: workspaceRepoPath,
+		filters: {
+			process: processId,
+			stage,
+		},
+		startedCount: startedTasks.length,
+		startedTaskIds: taskIds,
+		startedTasks,
 	};
 }
 
@@ -804,6 +1808,11 @@ async function trashTaskById(input: {
 				},
 				save: false,
 			};
+		}
+		if (taskHasIncompleteProcess(latestRecord.task)) {
+			throw new Error(
+				`Task "${input.taskId}" has an incomplete process at stage "${latestRecord.task.process?.stageId}". Use task process pass/fail to complete the process before moving it to done.`,
+			);
 		}
 
 		const trashed = trashTaskAndGetReadyLinkedTaskIds(latestState.board, input.taskId);
@@ -1118,6 +2127,7 @@ export function registerTaskCommand(program: Command): void {
 	task
 		.command("create")
 		.description("Create a task in backlog.")
+		.option("--task-id <id>", "Explicit task ID to create. Fails if the ID already exists.")
 		.option("--title <text>", "Task title.")
 		.requiredOption("--prompt <text>", "Task prompt text.")
 		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
@@ -1126,6 +2136,7 @@ export function registerTaskCommand(program: Command): void {
 		.option("--auto-review-enabled [value]", "Enable auto-review behavior (true|false). Flag-only implies true.")
 		.option("--auto-review-mode <mode>", "Auto-review mode: commit | pr.", parseAutoReviewMode)
 		.option("--agent-id <id>", "Agent override: cline | claude | codex | droid | gemini | opencode | default.")
+		.option("--process <id>", "Assign a task process: sdd | tdd | gsd | lightweight | custom process id.")
 		.option(
 			"--cline-provider <id>",
 			'Cline provider override (e.g. anthropic, openai, cline). Use "default" for workspace default.',
@@ -1140,6 +2151,7 @@ export function registerTaskCommand(program: Command): void {
 		)
 		.action(
 			async (options: {
+				taskId?: string;
 				title?: string;
 				prompt: string;
 				projectPath?: string;
@@ -1148,6 +2160,7 @@ export function registerTaskCommand(program: Command): void {
 				autoReviewEnabled?: unknown;
 				autoReviewMode?: "commit" | "pr";
 				agentId?: string;
+				process?: string;
 				clineProvider?: string;
 				clineModel?: string;
 				clineReasoningEffort?: string;
@@ -1156,6 +2169,7 @@ export function registerTaskCommand(program: Command): void {
 					async () =>
 						await createTask({
 							cwd: process.cwd(),
+							taskId: options.taskId,
 							title: options.title,
 							prompt: options.prompt,
 							projectPath: options.projectPath,
@@ -1164,6 +2178,7 @@ export function registerTaskCommand(program: Command): void {
 							autoReviewEnabled: parseOptionalBooleanOption(options.autoReviewEnabled, "--auto-review-enabled"),
 							autoReviewMode: options.autoReviewMode,
 							agentId: parseAgentId(options.agentId) ?? undefined,
+							processId: parseOptionalProcessId(options.process) ?? undefined,
 							clineSettings: buildTaskClineSettingsForCreate({
 								providerId: parseOptionalStringOrDefault(options.clineProvider) ?? undefined,
 								modelId: parseOptionalStringOrDefault(options.clineModel) ?? undefined,
@@ -1185,6 +2200,7 @@ export function registerTaskCommand(program: Command): void {
 		.option("--start-in-plan-mode [value]", "Set plan mode (true|false). Flag-only implies true.")
 		.option("--auto-review-enabled [value]", "Enable auto-review behavior (true|false). Flag-only implies true.")
 		.option("--auto-review-mode <mode>", "Auto-review mode: commit | pr.", parseAutoReviewMode)
+		.option("--process <id>", 'Assign a task process by id. Use "none" to clear.')
 		.option(
 			"--agent-id <id>",
 			'Agent override: cline | claude | codex | droid | gemini | opencode. Use "default" to clear.',
@@ -1208,6 +2224,7 @@ export function registerTaskCommand(program: Command): void {
 				startInPlanMode?: unknown;
 				autoReviewEnabled?: unknown;
 				autoReviewMode?: "commit" | "pr";
+				process?: string;
 				agentId?: string;
 				clineProvider?: string;
 				clineModel?: string;
@@ -1225,6 +2242,7 @@ export function registerTaskCommand(program: Command): void {
 							startInPlanMode: parseOptionalBooleanOption(options.startInPlanMode, "--start-in-plan-mode"),
 							autoReviewEnabled: parseOptionalBooleanOption(options.autoReviewEnabled, "--auto-review-enabled"),
 							autoReviewMode: options.autoReviewMode,
+							processId: parseOptionalProcessId(options.process),
 							agentId: parseAgentId(options.agentId),
 							clineProviderId: parseOptionalStringOrDefault(options.clineProvider),
 							clineModelId: parseOptionalStringOrDefault(options.clineModel),
@@ -1328,6 +2346,336 @@ export function registerTaskCommand(program: Command): void {
 					}),
 			);
 		});
+
+	const processCommand = task.command("process").description("Record process notes and pass/fail outcomes.");
+
+	processCommand
+		.command("list")
+		.description("List built-in and workspace custom process definitions.")
+		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
+		.action(async (options: { projectPath?: string }) => {
+			await runTaskCommand(
+				async () =>
+					await listTaskProcesses({
+						cwd: process.cwd(),
+						projectPath: options.projectPath,
+					}),
+			);
+		});
+
+	processCommand
+		.command("import")
+		.description("Import one process JSON definition or an array of definitions into the workspace.")
+		.requiredOption("--file <path>", "Path to a process JSON file.")
+		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
+		.option("--replace", "Replace all existing custom process definitions with the imported definitions.")
+		.action(async (options: { file: string; projectPath?: string; replace?: boolean }) => {
+			await runTaskCommand(
+				async () =>
+					await importTaskProcesses({
+						cwd: process.cwd(),
+						file: options.file,
+						projectPath: options.projectPath,
+						replace: options.replace === true,
+					}),
+			);
+		});
+
+	processCommand
+		.command("export")
+		.description("Export one process definition as JSON.")
+		.requiredOption("--process <id>", "Process ID to export.")
+		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
+		.action(async (options: { process: string; projectPath?: string }) => {
+			await runTaskCommand(
+				async () =>
+					await exportTaskProcess({
+						cwd: process.cwd(),
+						processId: options.process,
+						projectPath: options.projectPath,
+					}),
+			);
+		});
+
+	processCommand
+		.command("remove")
+		.description("Remove a workspace custom process definition.")
+		.requiredOption("--process <id>", "Custom process ID to remove.")
+		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
+		.action(async (options: { process: string; projectPath?: string }) => {
+			await runTaskCommand(
+				async () =>
+					await removeTaskProcess({
+						cwd: process.cwd(),
+						processId: options.process,
+						projectPath: options.projectPath,
+					}),
+			);
+		});
+
+	processCommand
+		.command("status")
+		.description("List process-backed task status with Gate-style filters.")
+		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
+		.option("--process <id>", "Process ID to filter.")
+		.option("--pipeline <id>", "Alias for --process.")
+		.option("--stage <id>", "Process stage to filter.")
+		.option("--state <id>", "Alias for --stage.")
+		.option("--ready-stage <id>", "Effective runnable stage to filter after passive dispatch.")
+		.option("--ready [boolean]", "Filter tasks whose current process stage is ready to run.")
+		.option("--blocked [boolean]", "Filter dependency-blocked process tasks.")
+		.option("--include-done [boolean]", "Include Done column process tasks.")
+		.option("--summary [boolean]", "Include aggregate counts.")
+		.action(
+			async (options: {
+				projectPath?: string;
+				process?: string;
+				pipeline?: string;
+				stage?: string;
+				state?: string;
+				readyStage?: string;
+				ready?: unknown;
+				blocked?: unknown;
+				includeDone?: unknown;
+				summary?: unknown;
+			}) => {
+				await runTaskCommand(
+					async () =>
+						await getTaskProcessStatus({
+							cwd: process.cwd(),
+							projectPath: options.projectPath,
+							processId: options.process ?? options.pipeline,
+							stage: options.stage ?? options.state,
+							readyStage: options.readyStage,
+							ready: parseOptionalBooleanOption(options.ready, "--ready"),
+							blocked: parseOptionalBooleanOption(options.blocked, "--blocked"),
+							includeDone: parseOptionalBooleanOption(options.includeDone, "--include-done") ?? false,
+							summary: parseOptionalBooleanOption(options.summary, "--summary") ?? false,
+						}),
+				);
+			},
+		);
+
+	processCommand
+		.command("run-ready")
+		.description("Start fresh agents for ready, unblocked process stages.")
+		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
+		.option("--process <id>", "Process ID to filter.")
+		.option("--pipeline <id>", "Alias for --process.")
+		.option("--stage <id>", "Process stage to filter.")
+		.option("--state <id>", "Alias for --stage.")
+		.action(
+			async (options: {
+				projectPath?: string;
+				process?: string;
+				pipeline?: string;
+				stage?: string;
+				state?: string;
+			}) => {
+				await runTaskCommand(
+					async () =>
+						await runReadyTaskProcessStages({
+							cwd: process.cwd(),
+							projectPath: options.projectPath,
+							processId: options.process ?? options.pipeline,
+							stage: options.stage ?? options.state,
+						}),
+				);
+			},
+		);
+
+	processCommand
+		.command("history")
+		.description("Read a process-backed task stage history.")
+		.requiredOption("--task-id <id>", "Task ID.")
+		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
+		.option("--process <id>", "Process ID guard.")
+		.option("--pipeline <id>", "Alias for --process.")
+		.action(async (options: { taskId: string; projectPath?: string; process?: string; pipeline?: string }) => {
+			await runTaskCommand(
+				async () =>
+					await getTaskProcessHistory({
+						cwd: process.cwd(),
+						taskId: options.taskId,
+						projectPath: options.projectPath,
+						processId: options.process ?? options.pipeline,
+					}),
+			);
+		});
+
+	processCommand
+		.command("body")
+		.description("Read a process-backed task body.")
+		.requiredOption("--task-id <id>", "Task ID.")
+		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
+		.option("--process <id>", "Process ID guard.")
+		.option("--pipeline <id>", "Alias for --process.")
+		.action(async (options: { taskId: string; projectPath?: string; process?: string; pipeline?: string }) => {
+			await runTaskCommand(
+				async () =>
+					await getTaskProcessBody({
+						cwd: process.cwd(),
+						taskId: options.taskId,
+						projectPath: options.projectPath,
+						processId: options.process ?? options.pipeline,
+					}),
+			);
+		});
+
+	processCommand
+		.command("append")
+		.description("Append notes to the current process stage without changing stage.")
+		.requiredOption("--task-id <id>", "Task ID.")
+		.requiredOption("--notes <text>", "Stage notes/evidence.")
+		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
+		.option("--agent <id>", "Agent or role recording the note. Defaults to current process stage role.")
+		.option("--model <id>", "Optional model identifier.")
+		.option("--process <id>", "Process ID guard.")
+		.option("--pipeline <id>", "Alias for --process.")
+		.option("--expected-stage <stage>", "Optional guard requiring the current process stage.")
+		.action(
+			async (options: {
+				taskId: string;
+				notes: string;
+				projectPath?: string;
+				agent?: string;
+				model?: string;
+				process?: string;
+				pipeline?: string;
+				expectedStage?: string;
+			}) => {
+				await runTaskCommand(
+					async () =>
+						await updateTaskProcessCommand({
+							cwd: process.cwd(),
+							action: "append",
+							taskId: options.taskId,
+							notes: options.notes,
+							projectPath: options.projectPath,
+							processId: options.process ?? options.pipeline,
+							agent: options.agent,
+							model: options.model,
+							expectedStage: options.expectedStage,
+						}),
+				);
+			},
+		);
+
+	processCommand
+		.command("pass")
+		.description("Pass the current process stage and follow its pass transition.")
+		.requiredOption("--task-id <id>", "Task ID.")
+		.requiredOption("--notes <text>", "Stage pass notes/evidence.")
+		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
+		.option("--agent <id>", "Agent or role recording the outcome. Defaults to current process stage role.")
+		.option("--model <id>", "Optional model identifier.")
+		.option("--process <id>", "Process ID guard.")
+		.option("--pipeline <id>", "Alias for --process.")
+		.option("--expected-stage <stage>", "Optional guard requiring the current process stage.")
+		.action(
+			async (options: {
+				taskId: string;
+				notes: string;
+				projectPath?: string;
+				agent?: string;
+				model?: string;
+				process?: string;
+				pipeline?: string;
+				expectedStage?: string;
+			}) => {
+				await runTaskCommand(
+					async () =>
+						await updateTaskProcessCommand({
+							cwd: process.cwd(),
+							action: "pass",
+							taskId: options.taskId,
+							notes: options.notes,
+							projectPath: options.projectPath,
+							processId: options.process ?? options.pipeline,
+							agent: options.agent,
+							model: options.model,
+							expectedStage: options.expectedStage,
+						}),
+				);
+			},
+		);
+
+	processCommand
+		.command("fail")
+		.description("Fail the current process stage and follow its fail transition.")
+		.requiredOption("--task-id <id>", "Task ID.")
+		.requiredOption("--notes <text>", "Stage fail notes/evidence.")
+		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
+		.option("--agent <id>", "Agent or role recording the outcome. Defaults to current process stage role.")
+		.option("--model <id>", "Optional model identifier.")
+		.option("--process <id>", "Process ID guard.")
+		.option("--pipeline <id>", "Alias for --process.")
+		.option("--expected-stage <stage>", "Optional guard requiring the current process stage.")
+		.action(
+			async (options: {
+				taskId: string;
+				notes: string;
+				projectPath?: string;
+				agent?: string;
+				model?: string;
+				process?: string;
+				pipeline?: string;
+				expectedStage?: string;
+			}) => {
+				await runTaskCommand(
+					async () =>
+						await updateTaskProcessCommand({
+							cwd: process.cwd(),
+							action: "fail",
+							taskId: options.taskId,
+							notes: options.notes,
+							projectPath: options.projectPath,
+							processId: options.process ?? options.pipeline,
+							agent: options.agent,
+							model: options.model,
+							expectedStage: options.expectedStage,
+						}),
+				);
+			},
+		);
+
+	processCommand
+		.command("reopen")
+		.description("Reopen a completed process task and reset it to the initial stage.")
+		.requiredOption("--task-id <id>", "Task ID.")
+		.requiredOption("--notes <text>", "Reopen notes/evidence.")
+		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
+		.requiredOption("--agent <id>", "Agent or role recording the reopen.")
+		.option("--model <id>", "Optional model identifier.")
+		.option("--process <id>", "Process ID guard.")
+		.option("--pipeline <id>", "Alias for --process.")
+		.option("--expected-stage <stage>", "Optional guard requiring the current process stage.")
+		.action(
+			async (options: {
+				taskId: string;
+				notes: string;
+				projectPath?: string;
+				agent?: string;
+				model?: string;
+				process?: string;
+				pipeline?: string;
+				expectedStage?: string;
+			}) => {
+				await runTaskCommand(
+					async () =>
+						await reopenTaskProcessCommand({
+							cwd: process.cwd(),
+							taskId: options.taskId,
+							notes: options.notes,
+							projectPath: options.projectPath,
+							processId: options.process ?? options.pipeline,
+							agent: options.agent,
+							model: options.model,
+							expectedStage: options.expectedStage,
+						}),
+				);
+			},
+		);
 
 	task
 		.command("start")

@@ -12,7 +12,7 @@ function resolveTsxLoaderImportSpecifier(): string {
 }
 
 describe("cli compatibility flags", () => {
-	it("accepts the deprecated --agent flag as a no-op", () => {
+	it("rejects the removed root --agent flag", () => {
 		const result = spawnSync(
 			process.execPath,
 			[
@@ -21,17 +21,15 @@ describe("cli compatibility flags", () => {
 				resolve(process.cwd(), "src/cli.ts"),
 				"--agent",
 				"legacy-alias-value",
-				"--help",
+				"--no-open",
 			],
 			{
 				encoding: "utf8",
 			},
 		);
 
-		expect(result.status).toBe(0);
-		expect(result.stderr).toBe("");
-		expect(result.stdout).toContain("--port");
+		expect(result.status).not.toBe(0);
+		expect(result.stderr).toContain("unknown option '--agent'");
 		expect(result.stdout).not.toContain("--agent");
-		expect(result.stdout).not.toContain("Agent IDs:");
 	});
 });

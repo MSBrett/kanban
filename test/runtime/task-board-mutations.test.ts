@@ -56,6 +56,25 @@ describe("deleteTasksFromBoard", () => {
 	});
 });
 
+describe("process trash guard", () => {
+	it("keeps incomplete process tasks out of trash", () => {
+		const created = addTaskToColumn(
+			createBoard(),
+			"in_progress",
+			{ prompt: "Process task", baseRef: "main", processId: "lightweight" },
+			() => "aaaaa111",
+		);
+
+		const moved = moveTaskToColumn(created.board, "aaaaa", "trash");
+		expect(moved.moved).toBe(false);
+		expect(moved.fromColumnId).toBe("in_progress");
+
+		const trashed = trashTaskAndGetReadyLinkedTaskIds(created.board, "aaaaa");
+		expect(trashed.moved).toBe(false);
+		expect(trashed.readyTaskIds).toEqual([]);
+	});
+});
+
 describe("task images", () => {
 	it("preserves images when creating and updating tasks", () => {
 		const created = addTaskToColumn(

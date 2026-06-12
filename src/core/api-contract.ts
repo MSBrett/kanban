@@ -96,6 +96,232 @@ export const runtimeTaskClineSettingsSchema = z.object({
 	reasoningEffort: runtimeClineReasoningEffortSchema.optional(),
 });
 export type RuntimeTaskClineSettings = z.infer<typeof runtimeTaskClineSettingsSchema>;
+
+export const runtimeTaskProcessIdSchema = z
+	.string()
+	.trim()
+	.min(1, "Process ID cannot be empty.")
+	.regex(
+		/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/,
+		"Process ID may only contain letters, numbers, dots, dashes, and underscores.",
+	);
+export type RuntimeTaskProcessId = z.infer<typeof runtimeTaskProcessIdSchema>;
+
+export const runtimeTaskProcessStatusSchema = z.enum(["ready", "running", "complete"]);
+export type RuntimeTaskProcessStatus = z.infer<typeof runtimeTaskProcessStatusSchema>;
+
+export const runtimeTaskProcessVerdictSchema = z.enum(["pass", "fail"]);
+export type RuntimeTaskProcessVerdict = z.infer<typeof runtimeTaskProcessVerdictSchema>;
+
+export const runtimeTaskProcessHistoryRecordKindSchema = z.enum(["dispatch", "outcome", "append", "reopen"]);
+export type RuntimeTaskProcessHistoryRecordKind = z.infer<typeof runtimeTaskProcessHistoryRecordKindSchema>;
+
+export const runtimeTaskProcessConditionPathSchema = z.enum(["agent", "model", "notes"]);
+export type RuntimeTaskProcessConditionPath = z.infer<typeof runtimeTaskProcessConditionPathSchema>;
+
+export const runtimeTaskProcessConditionalTransitionSchema = z
+	.object({
+		verdict: runtimeTaskProcessVerdictSchema,
+		target: z.string().trim().min(1),
+		label: z.string().trim().min(1).optional(),
+		path: runtimeTaskProcessConditionPathSchema,
+		equals: z.string().trim().min(1).optional(),
+		contains: z.string().trim().min(1).optional(),
+	})
+	.strict()
+	.superRefine((condition, context) => {
+		const matcherCount = [condition.equals, condition.contains].filter((value) => Boolean(value)).length;
+		if (matcherCount !== 1) {
+			context.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: ["equals"],
+				message: "Conditional process transition must define exactly one matcher: equals or contains.",
+			});
+		}
+	});
+export type RuntimeTaskProcessConditionalTransition = z.infer<typeof runtimeTaskProcessConditionalTransitionSchema>;
+
+export const runtimeTaskProcessStateDefinitionSchema = z
+	.object({
+		label: z.string().trim().min(1).optional(),
+		role: z.string().trim().min(1).optional(),
+		agentId: runtimeAgentIdSchema.optional(),
+		prompt: z.string().trim().min(1).optional(),
+		terminal: z.boolean().default(false).optional(),
+		on: z
+			.object({
+				pass: z.string().trim().min(1).optional(),
+				fail: z.string().trim().min(1).optional(),
+			})
+			.strict()
+			.default({}),
+		conditions: z.array(runtimeTaskProcessConditionalTransitionSchema).default([]).optional(),
+	})
+	.strict();
+export type RuntimeTaskProcessStateDefinition = z.infer<typeof runtimeTaskProcessStateDefinitionSchema>;
+
+export const runtimeTaskProcessDefinitionSchema = z
+	.object({
+		schemaVersion: z.literal(1),
+		id: runtimeTaskProcessIdSchema,
+		name: z.string().trim().min(1, "Process name cannot be empty."),
+		description: z.string().trim().min(1).optional(),
+		initial: z.string().trim().min(1, "Initial process stage cannot be empty."),
+		states: z.record(z.string().trim().min(1), runtimeTaskProcessStateDefinitionSchema),
+	})
+	.strict()
+	.superRefine((definition, context) => {
+		if (!definition.states[definition.initial]) {
+			context.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: ["initial"],
+				message: `Initial process stage "${definition.initial}" is not defined.`,
+			});
+		}
+		for (const [stageId, stage] of Object.entries(definition.states)) {
+			if (stage.terminal && (stage.on.pass || stage.on.fail || (stage.conditions?.length ?? 0) > 0)) {
+				context.addIssue({
+					code: z.ZodIssueCode.custom,
+					path: ["states", stageId],
+					message: `Terminal process stage "${stageId}" cannot declare transitions.`,
+				});
+			}
+			for (const [verdict, target] of Object.entries(stage.on)) {
+				if (target && !definition.states[target]) {
+					context.addIssue({
+						code: z.ZodIssueCode.custom,
+						path: ["states", stageId, "on", verdict],
+						message: `Process stage "${stageId}" points to unknown target "${target}".`,
+					});
+				}
+			}
+			for (const [conditionIndex, condition] of (stage.conditions ?? []).entries()) {
+				if (!definition.states[condition.target]) {
+					context.addIssue({
+						code: z.ZodIssueCode.custom,
+						path: ["states", stageId, "conditions", conditionIndex, "target"],
+						message: `Process stage "${stageId}" conditional transition points to unknown target "${condition.target}".`,
+					});
+				}
+			}
+		}
+		const stageEntries = Object.entries(definition.states);
+		const terminalStageIds = stageEntries.filter(([, stage]) => stage.terminal === true).map(([stageId]) => stageId);
+		if (terminalStageIds.length === 0) {
+			context.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: ["states"],
+				message: "Process must define at least one terminal stage.",
+			});
+		}
+		if (!definition.states[definition.initial]) {
+			return;
+		}
+		const reachableStageIds = new Set<string>();
+		const pendingStageIds = [definition.initial];
+		for (const stageId of pendingStageIds) {
+			if (reachableStageIds.has(stageId)) {
+				continue;
+			}
+			const stage = definition.states[stageId];
+			if (!stage) {
+				continue;
+			}
+			reachableStageIds.add(stageId);
+			for (const targetStageId of [
+				stage.on.pass,
+				stage.on.fail,
+				...(stage.conditions ?? []).map((condition) => condition.target),
+			]) {
+				if (targetStageId && definition.states[targetStageId] && !reachableStageIds.has(targetStageId)) {
+					pendingStageIds.push(targetStageId);
+				}
+			}
+		}
+		const unreachableStageIds = stageEntries
+			.filter(([stageId]) => !reachableStageIds.has(stageId))
+			.map(([stageId]) => stageId);
+		if (unreachableStageIds.length > 0) {
+			context.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: ["states"],
+				message: `Process stage(s) are not reachable from initial stage "${definition.initial}": ${unreachableStageIds.join(", ")}.`,
+			});
+		}
+		const noOutgoingStageIds = stageEntries
+			.filter(
+				([stageId, stage]) =>
+					reachableStageIds.has(stageId) &&
+					stage.terminal !== true &&
+					!stage.on.pass &&
+					!stage.on.fail &&
+					(stage.conditions?.length ?? 0) === 0,
+			)
+			.map(([stageId]) => stageId);
+		if (noOutgoingStageIds.length > 0) {
+			context.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: ["states"],
+				message: `Reachable nonterminal process stage(s) must define pass or fail transitions: ${noOutgoingStageIds.join(", ")}.`,
+			});
+		}
+		const canReachTerminal = (stageId: string, seenStageIds: Set<string>): boolean => {
+			if (seenStageIds.has(stageId)) {
+				return false;
+			}
+			const stage = definition.states[stageId];
+			if (!stage) {
+				return false;
+			}
+			if (stage.terminal === true) {
+				return true;
+			}
+			const nextSeenStageIds = new Set(seenStageIds);
+			nextSeenStageIds.add(stageId);
+			return [stage.on.pass, stage.on.fail, ...(stage.conditions ?? []).map((condition) => condition.target)].some(
+				(targetStageId) =>
+					targetStageId && definition.states[targetStageId]
+						? canReachTerminal(targetStageId, nextSeenStageIds)
+						: false,
+			);
+		};
+		const terminalUnreachableStageIds = [...reachableStageIds].filter(
+			(stageId) => !canReachTerminal(stageId, new Set()),
+		);
+		if (terminalUnreachableStageIds.length > 0) {
+			context.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: ["states"],
+				message: `Reachable process stage(s) cannot reach a terminal stage: ${terminalUnreachableStageIds.join(", ")}.`,
+			});
+		}
+	});
+export type RuntimeTaskProcessDefinition = z.infer<typeof runtimeTaskProcessDefinitionSchema>;
+
+export const runtimeTaskProcessHistoryEntrySchema = z.object({
+	stageId: z.string(),
+	targetStageId: z.string().optional(),
+	verdict: runtimeTaskProcessVerdictSchema.optional(),
+	recordKind: runtimeTaskProcessHistoryRecordKindSchema.default("outcome").optional(),
+	agent: z.string().trim().min(1).optional(),
+	model: z.string().trim().min(1).optional(),
+	notes: z.string().optional(),
+	at: z.number(),
+});
+export type RuntimeTaskProcessHistoryEntry = z.infer<typeof runtimeTaskProcessHistoryEntrySchema>;
+
+export const runtimeTaskProcessStateSchema = z.object({
+	processId: runtimeTaskProcessIdSchema,
+	processName: z.string().optional(),
+	processDigest: z.string().optional(),
+	definition: runtimeTaskProcessDefinitionSchema.optional(),
+	stageId: z.string(),
+	status: runtimeTaskProcessStatusSchema.default("ready"),
+	lastVerdict: runtimeTaskProcessVerdictSchema.optional(),
+	updatedAt: z.number(),
+	history: z.array(runtimeTaskProcessHistoryEntrySchema).default([]),
+});
+export type RuntimeTaskProcessState = z.infer<typeof runtimeTaskProcessStateSchema>;
 export const runtimeTaskImageSchema = z.object({
 	id: z.string(),
 	data: z.string(),
@@ -140,6 +366,7 @@ export const runtimeBoardCardSchema = z
 		images: z.array(runtimeTaskImageSchema).optional(),
 		agentId: runtimeAgentIdSchema.optional(),
 		clineSettings: runtimeTaskClineSettingsSchema.optional(),
+		process: runtimeTaskProcessStateSchema.optional(),
 		clineProviderId: z.string().optional(),
 		clineModelId: z.string().optional(),
 		clineReasoningEffort: runtimeLegacyTaskClineReasoningEffortSchema.optional(),
@@ -187,6 +414,7 @@ export type RuntimeBoardDependency = z.infer<typeof runtimeBoardDependencySchema
 export const runtimeBoardDataSchema = z.object({
 	columns: z.array(runtimeBoardColumnSchema),
 	dependencies: z.array(runtimeBoardDependencySchema).default([]),
+	processes: z.array(runtimeTaskProcessDefinitionSchema).default([]).optional(),
 });
 export type RuntimeBoardData = z.infer<typeof runtimeBoardDataSchema>;
 
@@ -951,6 +1179,7 @@ export const runtimeConfigResponseSchema = z.object({
 	agents: z.array(runtimeAgentDefinitionSchema),
 	shortcuts: z.array(runtimeProjectShortcutSchema),
 	clineProviderSettings: runtimeClineProviderSettingsSchema,
+	kanbanCommand: z.string().optional(),
 	commitPromptTemplate: z.string(),
 	openPrPromptTemplate: z.string(),
 	commitPromptTemplateDefault: z.string(),
@@ -978,6 +1207,7 @@ export const runtimeTaskSessionStartRequestSchema = z.object({
 	startInPlanMode: z.boolean().optional(),
 	mode: runtimeTaskSessionModeSchema.optional(),
 	resumeFromTrash: z.boolean().optional(),
+	replaceActive: z.boolean().optional(),
 	baseRef: z.string(),
 	cols: z.number().int().positive().optional(),
 	rows: z.number().int().positive().optional(),

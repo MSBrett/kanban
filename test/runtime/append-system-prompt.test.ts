@@ -65,6 +65,38 @@ describe("renderAppendSystemPrompt", () => {
 		expect(rendered).toContain("Provide exactly one of");
 		expect(rendered).toContain("task delete --column done");
 		expect(rendered).toContain("kanban task link");
+		expect(rendered).toContain("kanban task process list [--project-path <path>]");
+		expect(rendered).toContain("kanban task process import --file <path> [--project-path <path>] [--replace]");
+		expect(rendered).toContain("kanban task process export --process <id> [--project-path <path>]");
+		expect(rendered).toContain(
+			"kanban task process status [--project-path <path>] [--process <id>|--pipeline <id>] [--stage <id>|--state <id>]",
+		);
+		expect(rendered).toContain(
+			"kanban task process run-ready [--project-path <path>] [--process <id>|--pipeline <id>] [--stage <id>|--state <id>]",
+		);
+		expect(rendered).toContain(
+			"kanban task process history --task-id <task_id> [--project-path <path>] [--process <id>|--pipeline <id>]",
+		);
+		expect(rendered).toContain(
+			"kanban task process body --task-id <task_id> [--project-path <path>] [--process <id>|--pipeline <id>]",
+		);
+		expect(rendered).toContain(
+			'kanban task process append --task-id <task_id> --notes "<text>" --expected-stage <stage_id> [--project-path <path>]',
+		);
+		expect(rendered).toContain("required guard that prevents stale agents");
+		expect(rendered).toContain(
+			'kanban task process pass --task-id <task_id> --notes "<text>" [--project-path <path>] [--process <id>|--pipeline <id>]',
+		);
+		expect(rendered).toContain(
+			'kanban task process fail --task-id <task_id> --notes "<text>" [--project-path <path>] [--process <id>|--pipeline <id>]',
+		);
+		expect(rendered).toContain(
+			'kanban task process reopen --task-id <task_id> --notes "<text>" --agent <id> [--project-path <path>]',
+		);
+		expect(rendered).toContain(
+			"`--process <id>` / `--pipeline <id>` optional process guard that prevents mutating a task assigned to a different process.",
+		);
+		expect(rendered).toContain("starts every currently ready process stage that matches the filters.");
 		expect(rendered).toContain("If a task command fails because the runtime is unavailable");
 		expect(rendered).toContain("If the user asks for GitHub work");
 		expect(rendered).toContain("gh issue view");

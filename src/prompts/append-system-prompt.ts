@@ -190,26 +190,27 @@ Parameters:
 
 ## task create
 
-Purpose: create a new task in \`backlog\`, with optional plan mode and auto-review behavior.
+Purpose: create a new task in \`backlog\`, with optional plan mode, auto-review behavior, and process assignment.
 
 Command:
-\`${kanbanCommand} task create [--title "<text>"] --prompt "<text>" [--project-path <path>] [--base-ref <branch>] [--start-in-plan-mode <true|false>] [--auto-review-enabled <true|false>] [--auto-review-mode commit|pr]\`
+\`${kanbanCommand} task create [--title "<text>"] --prompt "<text>" [--project-path <path>] [--base-ref <branch>] [--process sdd|tdd|gsd|lightweight|<custom_id>] [--start-in-plan-mode <true|false>] [--auto-review-enabled <true|false>] [--auto-review-mode commit|pr]\`
 
 Parameters:
 - \`--title "<text>"\` optional task title. If omitted, Kanban derives one from the prompt.
 - \`--prompt "<text>"\` required task prompt text.
 - \`--project-path <path>\` optional workspace path. If not already registered in Kanban, it is auto-added for git repos.
 - \`--base-ref <branch>\` optional base branch/worktree ref. Defaults to current branch, then default branch, then first known branch.
+- \`--process <id>\` optional process assignment. Built-ins: \`sdd\`, \`tdd\`, \`gsd\`, \`lightweight\`; custom IDs come from Kanban process definitions.
 - \`--start-in-plan-mode <true|false>\` optional. Default false. Set true only when explicitly requested.
 - \`--auto-review-enabled <true|false>\` optional. Default false. Enables automatic action once task reaches review.
 - \`--auto-review-mode commit|pr\` optional auto-review action. Default \`commit\`.
 
 ## task update
 
-Purpose: update an existing task, including prompt, base ref, plan mode, and auto-review behavior.
+Purpose: update an existing task, including prompt, base ref, plan mode, process assignment, and auto-review behavior.
 
 Command:
-\`${kanbanCommand} task update --task-id <task_id> [--title "<text>"] [--prompt "<text>"] [--project-path <path>] [--base-ref <branch>] [--start-in-plan-mode <true|false>] [--auto-review-enabled <true|false>] [--auto-review-mode commit|pr]\`
+\`${kanbanCommand} task update --task-id <task_id> [--title "<text>"] [--prompt "<text>"] [--project-path <path>] [--base-ref <branch>] [--process sdd|tdd|gsd|lightweight|<custom_id>|none] [--start-in-plan-mode <true|false>] [--auto-review-enabled <true|false>] [--auto-review-mode commit|pr]\`
 
 Parameters:
 - \`--task-id <task_id>\` required task ID.
@@ -217,12 +218,132 @@ Parameters:
 - \`--title "<text>"\` optional replacement title.
 - \`--prompt "<text>"\` optional replacement prompt text.
 - \`--base-ref <branch>\` optional replacement base ref.
+- \`--process <id>\` optional replacement process assignment. Use \`none\` to clear the assigned process.
 - \`--start-in-plan-mode <true|false>\` optional replacement of plan-mode behavior.
 - \`--auto-review-enabled <true|false>\` optional replacement of auto-review toggle. Set false to cancel pending automatic review actions.
 - \`--auto-review-mode commit|pr\` optional replacement auto-review action.
 
 Notes:
 - Provide at least one field to change in addition to \`--task-id\`.
+
+## task process list
+
+Purpose: list built-in and workspace custom process definitions.
+
+Command:
+\`${kanbanCommand} task process list [--project-path <path>]\`
+
+## task process import
+
+Purpose: import one Gate/Kanban process JSON definition, or an array of definitions, into the workspace.
+
+Command:
+\`${kanbanCommand} task process import --file <path> [--project-path <path>] [--replace]\`
+
+Parameters:
+- \`--file <path>\` required JSON file path.
+- \`--replace\` optional. Replaces existing custom process definitions with the imported definitions.
+
+## task process export
+
+Purpose: export one process definition as JSON.
+
+Command:
+\`${kanbanCommand} task process export --process <id> [--project-path <path>]\`
+
+## task process status
+
+Purpose: list process-backed task status with Gate-style filters.
+
+Command:
+\`${kanbanCommand} task process status [--project-path <path>] [--process <id>|--pipeline <id>] [--stage <id>|--state <id>] [--ready <true|false>] [--blocked <true|false>] [--include-done <true|false>] [--summary <true|false>]\`
+
+Notes:
+- Use \`--ready true\` to find stages Kanban can run now.
+- Use \`--blocked true\` to find stages waiting on unfinished dependencies.
+
+## task process run-ready
+
+Purpose: start fresh agents for every ready, unblocked process stage matching the optional filters.
+
+Command:
+\`${kanbanCommand} task process run-ready [--project-path <path>] [--process <id>|--pipeline <id>] [--stage <id>|--state <id>]\`
+
+Notes:
+- This starts every currently ready process stage that matches the filters.
+- Kanban skips dependency-blocked tasks.
+
+## task process history
+
+Purpose: read a process-backed task's stage history.
+
+Command:
+\`${kanbanCommand} task process history --task-id <task_id> [--project-path <path>] [--process <id>|--pipeline <id>]\`
+
+## task process body
+
+Purpose: read a process-backed task body and process metadata.
+
+Command:
+\`${kanbanCommand} task process body --task-id <task_id> [--project-path <path>] [--process <id>|--pipeline <id>]\`
+
+## task process append
+
+Purpose: append notes/evidence to the current process stage without changing stage.
+
+Command:
+\`${kanbanCommand} task process append --task-id <task_id> --notes "<text>" --expected-stage <stage_id> [--project-path <path>] [--process <id>|--pipeline <id>] [--agent <id>] [--model <id>]\`
+
+Parameters:
+- \`--task-id <task_id>\` required task ID.
+- \`--notes "<text>"\` required notes/evidence.
+- \`--project-path <path>\` optional workspace path.
+- \`--process <id>\` / \`--pipeline <id>\` optional process guard that prevents mutating a task assigned to a different process.
+- \`--agent <id>\` optional agent or role name. Defaults to the current process stage role.
+- \`--model <id>\` optional model identifier.
+- \`--expected-stage <stage_id>\` required guard that prevents stale agents from mutating the wrong stage.
+
+## task process pass
+
+Purpose: pass the current process stage and follow its \`pass\` edge. A final pass moves the task to done.
+
+Command:
+\`${kanbanCommand} task process pass --task-id <task_id> --notes "<text>" [--project-path <path>] [--process <id>|--pipeline <id>] [--agent <id>] [--model <id>] [--expected-stage <stage_id>]\`
+
+Parameters:
+- \`--task-id <task_id>\` required task ID.
+- \`--notes "<text>"\` required pass notes/evidence.
+- \`--project-path <path>\` optional workspace path.
+- \`--process <id>\` / \`--pipeline <id>\` optional process guard that prevents mutating a task assigned to a different process.
+- \`--agent <id>\` optional agent or role name. Defaults to the current process stage role.
+- \`--model <id>\` optional model identifier.
+- \`--expected-stage <stage_id>\` optional guard that prevents stale agents from mutating the wrong stage.
+
+## task process fail
+
+Purpose: fail the current process stage and follow its \`fail\` edge.
+
+Command:
+\`${kanbanCommand} task process fail --task-id <task_id> --notes "<text>" [--project-path <path>] [--process <id>|--pipeline <id>] [--agent <id>] [--model <id>] [--expected-stage <stage_id>]\`
+
+Parameters:
+- \`--task-id <task_id>\` required task ID.
+- \`--notes "<text>"\` required fail notes/evidence.
+- \`--project-path <path>\` optional workspace path.
+- \`--process <id>\` / \`--pipeline <id>\` optional process guard that prevents mutating a task assigned to a different process.
+- \`--agent <id>\` optional agent or role name. Defaults to the current process stage role.
+- \`--model <id>\` optional model identifier.
+- \`--expected-stage <stage_id>\` optional guard that prevents stale agents from mutating the wrong stage.
+
+## task process reopen
+
+Purpose: reopen a completed process task and reset it to the process initial stage.
+
+Command:
+\`${kanbanCommand} task process reopen --task-id <task_id> --notes "<text>" --agent <id> [--project-path <path>] [--process <id>|--pipeline <id>] [--model <id>] [--expected-stage <stage_id>]\`
+
+Notes:
+- Use this only for completed process tasks that need to re-enter the workflow.
 
 ## task done
 
@@ -238,6 +359,7 @@ Parameters:
 
 Notes:
 - Provide exactly one of \`--task-id\` or \`--column\`.
+- Process-backed tasks must reach a terminal process stage through \`task process pass\`; incomplete process tasks cannot be moved to done with this generic command.
 - \`task done --column done\` is a no-op for tasks already in done.
 
 ## task delete

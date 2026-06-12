@@ -1,10 +1,20 @@
 // Main React composition root for the browser app.
 // Keep this file focused on wiring top-level hooks and surfaces together, and
 // push runtime-specific orchestration down into hooks and service modules.
+
+import {
+	appendTaskProcessHistory,
+	assertTaskProcessStagePromptReady,
+	getTaskProcessDefinitions,
+	getTaskProcessStage,
+	isPassiveDispatchStage,
+	markTaskProcessRunning,
+	reopenTaskProcess,
+	transitionTaskProcess,
+} from "@runtime-task-process";
 import { FolderOpen } from "lucide-react";
 import type { ReactElement } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-
 import { AddProjectDialog } from "@/components/add-project-dialog";
 import { notifyError, showAppToast } from "@/components/app-toaster";
 import { CardDetailView } from "@/components/card-detail-view";
@@ -13,6 +23,7 @@ import { DebugDialog } from "@/components/debug-dialog";
 import { AgentTerminalPanel } from "@/components/detail-panels/agent-terminal-panel";
 import { GitHistoryView } from "@/components/git-history-view";
 import { KanbanBoard } from "@/components/kanban-board";
+import { ProcessDefinitionsDialog } from "@/components/process-definitions-dialog";
 import { ProjectNavigationPanel } from "@/components/project-navigation-panel";
 import { RuntimeSettingsDialog, type RuntimeSettingsSection } from "@/components/runtime-settings-dialog";
 import { StartupOnboardingDialog } from "@/components/startup-onboarding-dialog";
@@ -69,7 +80,12 @@ import { useRuntimeProjectConfig } from "@/runtime/use-runtime-project-config";
 import { useTerminalConnectionReady } from "@/runtime/use-terminal-connection-ready";
 import { useWorkspacePersistence } from "@/runtime/use-workspace-persistence";
 import { saveWorkspaceState } from "@/runtime/workspace-state-query";
-import { applyTaskDetailClineSettingsChange, findCardSelection } from "@/state/board-state";
+import {
+	applyTaskDetailClineSettingsChange,
+	findCardSelection,
+	moveTaskToColumn,
+	updateTaskProcess,
+} from "@/state/board-state";
 import {
 	getTaskWorkspaceInfo,
 	getTaskWorkspaceSnapshot,
@@ -77,7 +93,7 @@ import {
 	resetWorkspaceMetadataStore,
 } from "@/stores/workspace-metadata-store";
 import { useTerminalThemeColors } from "@/terminal/theme-colors";
-import type { BoardData } from "@/types";
+import type { BoardCard, BoardData, TaskProcessDefinition, TaskProcessVerdict } from "@/types";
 
 export default function App(): ReactElement {
 	const terminalThemeColors = useTerminalThemeColors();
@@ -89,13 +105,35 @@ export default function App(): ReactElement {
 	const [homeSidebarSection, setHomeSidebarSection] = useState<"projects" | "agent">("projects");
 	const [isClearTrashDialogOpen, setIsClearTrashDialogOpen] = useState(false);
 	const [isGitHistoryOpen, setIsGitHistoryOpen] = useState(false);
+	const [isProcessDefinitionsOpen, setIsProcessDefinitionsOpen] = useState(false);
 	const [pendingTaskStartAfterEditId, setPendingTaskStartAfterEditId] = useState<string | null>(null);
+	const [pendingTaskProcessRunAfterEditId, setPendingTaskProcessRunAfterEditId] = useState<string | null>(null);
+	const autoRunProcessStageStateRef = useRef<
+		Map<string, { columnId: string; status: string; stageId: string; updatedAt: number }>
+	>(new Map());
+	const autoRunProcessStageKeysRef = useRef<Set<string>>(new Set());
 	const taskEditorResetRef = useRef<() => void>(() => {});
 	const lastStreamErrorRef = useRef<string | null>(null);
+	const processUsageById = useMemo(() => {
+		const counts: Record<string, number> = {};
+		for (const column of board.columns) {
+			for (const card of column.cards) {
+				if (!card.process) {
+					continue;
+				}
+				counts[card.process.processId] = (counts[card.process.processId] ?? 0) + 1;
+			}
+		}
+		return counts;
+	}, [board.columns]);
+	const totalProcessCount = useMemo(() => getTaskProcessDefinitions(board.processes ?? []).length, [board.processes]);
 	const handleProjectSwitchStart = useCallback(() => {
 		setCanPersistWorkspaceState(false);
 		setIsGitHistoryOpen(false);
 		setPendingTaskStartAfterEditId(null);
+		setPendingTaskProcessRunAfterEditId(null);
+		autoRunProcessStageStateRef.current = new Map();
+		autoRunProcessStageKeysRef.current.clear();
 		taskEditorResetRef.current();
 	}, []);
 	const {
@@ -304,6 +342,8 @@ export default function App(): ReactElement {
 		setNewTaskAgentId,
 		newTaskClineSettings,
 		setNewTaskClineSettings,
+		newTaskProcessId,
+		setNewTaskProcessId,
 		editingTaskId,
 		editTaskPrompt,
 		setEditTaskPrompt,
@@ -322,6 +362,8 @@ export default function App(): ReactElement {
 		setEditTaskAgentId,
 		editTaskClineSettings,
 		setEditTaskClineSettings,
+		editTaskProcessId,
+		setEditTaskProcessId,
 		handleOpenCreateTask,
 		handleCancelCreateTask,
 		handleOpenEditTask,
@@ -516,6 +558,7 @@ export default function App(): ReactElement {
 	useEffect(() => {
 		resetTaskEditorState();
 		setIsClearTrashDialogOpen(false);
+		setIsProcessDefinitionsOpen(false);
 		resetGitActionState();
 		resetProjectNavigationState();
 		resetTerminalPanelsState();
@@ -559,12 +602,14 @@ export default function App(): ReactElement {
 	}, []);
 
 	const {
+		confirmMoveTaskToTrash,
 		handleProgrammaticCardMoveReady,
 		handleCreateDependency,
 		handleDeleteDependency,
 		handleDragEnd,
 		handleStartTask,
 		handleStartAllBacklogTasks,
+		handleRunTaskProcessStage,
 		handleDetailTaskDragEnd,
 		handleCardSelect,
 		handleMoveToTrash,
@@ -585,6 +630,8 @@ export default function App(): ReactElement {
 		selectedCard,
 		selectedTaskId,
 		currentProjectId,
+		workspacePath: workspacePath ?? navigationProjectPath ?? null,
+		kanbanCommand: runtimeProjectConfig?.kanbanCommand ?? null,
 		setSelectedTaskId,
 		setIsClearTrashDialogOpen,
 		setIsGitHistoryOpen,
@@ -642,6 +689,69 @@ export default function App(): ReactElement {
 		handleStartTaskFromBoard(pendingTaskStartAfterEditId);
 		setPendingTaskStartAfterEditId(null);
 	}, [board, handleStartTaskFromBoard, pendingTaskStartAfterEditId]);
+
+	useEffect(() => {
+		if (!pendingTaskProcessRunAfterEditId) {
+			return;
+		}
+		const selection = findCardSelection(board, pendingTaskProcessRunAfterEditId);
+		if (!selection) {
+			return;
+		}
+		setPendingTaskProcessRunAfterEditId(null);
+		if (!selection.card.process || selection.card.process.status !== "ready") {
+			return;
+		}
+		const runKey = `${selection.card.id}:${selection.card.process.stageId}:${selection.card.process.updatedAt}`;
+		if (autoRunProcessStageKeysRef.current.has(runKey)) {
+			return;
+		}
+		autoRunProcessStageKeysRef.current.add(runKey);
+		void handleRunTaskProcessStage(pendingTaskProcessRunAfterEditId);
+	}, [board, handleRunTaskProcessStage, pendingTaskProcessRunAfterEditId]);
+
+	useEffect(() => {
+		const previousByTaskId = autoRunProcessStageStateRef.current;
+		const nextByTaskId = new Map<string, { columnId: string; status: string; stageId: string; updatedAt: number }>();
+		const taskIdsToRun: string[] = [];
+
+		for (const column of board.columns) {
+			for (const card of column.cards) {
+				if (!card.process) {
+					continue;
+				}
+				const currentState = {
+					columnId: column.id,
+					status: card.process.status,
+					stageId: card.process.stageId,
+					updatedAt: card.process.updatedAt,
+				};
+				nextByTaskId.set(card.id, currentState);
+
+				const previousState = previousByTaskId.get(card.id);
+				if (
+					column.id !== "in_progress" ||
+					card.process.status !== "ready" ||
+					previousState?.columnId !== "in_progress" ||
+					previousState.status === "ready"
+				) {
+					continue;
+				}
+
+				const runKey = `${card.id}:${card.process.stageId}:${card.process.updatedAt}`;
+				if (autoRunProcessStageKeysRef.current.has(runKey)) {
+					continue;
+				}
+				autoRunProcessStageKeysRef.current.add(runKey);
+				taskIdsToRun.push(card.id);
+			}
+		}
+
+		autoRunProcessStageStateRef.current = nextByTaskId;
+		for (const taskId of taskIdsToRun) {
+			void handleRunTaskProcessStage(taskId);
+		}
+	}, [board, handleRunTaskProcessStage]);
 
 	const detailSession = selectedCard
 		? (sessions[selectedCard.card.id] ?? createIdleTaskSession(selectedCard.card.id))
@@ -761,6 +871,231 @@ export default function App(): ReactElement {
 		[handleCancelCreateTask],
 	);
 
+	const handleProcessDefinitionsChange = useCallback(
+		(processes: TaskProcessDefinition[]) => {
+			setBoard((currentBoard) => ({
+				...currentBoard,
+				processes,
+			}));
+		},
+		[setBoard],
+	);
+
+	const handleAppendProcessNote = useCallback(
+		(taskId: string, notes: string, expectedStage?: string, agentOverride?: string, modelOverride?: string) => {
+			const trimmedNotes = notes.trim();
+			if (!trimmedNotes) {
+				notifyError("Process notes are required.");
+				return;
+			}
+			const trimmedAgentOverride = agentOverride?.trim();
+			const trimmedModel = modelOverride?.trim();
+			let didUpdate = false;
+			let errorMessage: string | null = null;
+			setBoard((currentBoard) => {
+				const selection = findCardSelection(currentBoard, taskId);
+				if (!selection?.card.process) {
+					errorMessage = `Task "${taskId}" does not have a process assigned.`;
+					return currentBoard;
+				}
+				if (expectedStage && selection.card.process.stageId !== expectedStage) {
+					errorMessage = `Task "${taskId}" is at process stage "${selection.card.process.stageId}", expected "${expectedStage}".`;
+					return currentBoard;
+				}
+				try {
+					const stage = getTaskProcessStage(selection.card.process, currentBoard.processes ?? []);
+					const agent = trimmedAgentOverride || stage?.role?.trim() || stage?.id || selection.card.process.stageId;
+					const nextProcess = appendTaskProcessHistory(selection.card.process, {
+						notes: trimmedNotes,
+						agent,
+						...(trimmedModel ? { model: trimmedModel } : {}),
+					});
+					const result = updateTaskProcess(currentBoard, taskId, nextProcess);
+					didUpdate = result.updated;
+					return result.updated ? result.board : currentBoard;
+				} catch (error) {
+					errorMessage = error instanceof Error ? error.message : String(error);
+					return currentBoard;
+				}
+			});
+			if (errorMessage) {
+				notifyError(errorMessage);
+				return;
+			}
+			if (didUpdate) {
+				showAppToast({ intent: "success", message: "Process note appended.", timeout: 2500 });
+			}
+		},
+		[setBoard],
+	);
+
+	const handleTaskProcessVerdict = useCallback(
+		(
+			taskId: string,
+			verdict: TaskProcessVerdict,
+			notes: string,
+			expectedStage?: string,
+			agentOverride?: string,
+			modelOverride?: string,
+		) => {
+			const trimmedNotes = notes.trim();
+			if (!trimmedNotes) {
+				notifyError("Process verdict notes are required.");
+				return;
+			}
+			const trimmedAgentOverride = agentOverride?.trim();
+			const trimmedModel = modelOverride?.trim();
+			let didUpdate = false;
+			let completedTask: BoardCard | null = null;
+			let completedBoard: BoardData | null = null;
+			let nextStageId: string | null = null;
+			let shouldRunNextStage = false;
+			let errorMessage: string | null = null;
+			setBoard((currentBoard) => {
+				const selection = findCardSelection(currentBoard, taskId);
+				if (!selection?.card.process) {
+					errorMessage = `Task "${taskId}" does not have a process assigned.`;
+					return currentBoard;
+				}
+				if (expectedStage && selection.card.process.stageId !== expectedStage) {
+					errorMessage = `Task "${taskId}" is at process stage "${selection.card.process.stageId}", expected "${expectedStage}".`;
+					return currentBoard;
+				}
+				try {
+					const stage = getTaskProcessStage(selection.card.process, currentBoard.processes ?? []);
+					if (verdict === "pass" || verdict === "fail") {
+						assertTaskProcessStagePromptReady(selection.card.process, currentBoard.processes ?? []);
+					}
+					const agent = trimmedAgentOverride || stage?.role?.trim() || stage?.id || selection.card.process.stageId;
+					const processForVerdict =
+						expectedStage &&
+						selection.card.process.status !== "running" &&
+						stage &&
+						!isPassiveDispatchStage(stage)
+							? markTaskProcessRunning(selection.card.process, {
+									agent,
+									...(trimmedModel ? { model: trimmedModel } : {}),
+									notes: `Accepted guarded UI verdict for ${selection.card.process.stageId}.`,
+								})
+							: selection.card.process;
+					const nextProcess = transitionTaskProcess(processForVerdict, verdict, {
+						notes: trimmedNotes,
+						definitions: currentBoard.processes ?? [],
+						agent,
+						...(trimmedModel ? { model: trimmedModel } : {}),
+					});
+					nextStageId = nextProcess.stageId;
+					const result = updateTaskProcess(currentBoard, taskId, nextProcess);
+					if (!result.updated) {
+						return currentBoard;
+					}
+					didUpdate = true;
+					shouldRunNextStage =
+						nextProcess.status === "ready" &&
+						(selection.column.id === "in_progress" || selection.column.id === "review");
+					if (nextProcess.status !== "complete" || !result.task) {
+						return result.board;
+					}
+					completedTask = result.task;
+					completedBoard = result.board;
+					return result.board;
+				} catch (error) {
+					errorMessage = error instanceof Error ? error.message : String(error);
+					return currentBoard;
+				}
+			});
+			if (errorMessage) {
+				notifyError(errorMessage);
+				return;
+			}
+			if (didUpdate) {
+				showAppToast({
+					intent: verdict === "pass" ? "success" : "warning",
+					message: `Process ${verdict} recorded${nextStageId ? `; stage is now ${nextStageId}.` : "."}`,
+					timeout: 3000,
+				});
+			}
+			if (didUpdate && shouldRunNextStage) {
+				setPendingTaskProcessRunAfterEditId(taskId);
+			}
+			if (completedTask && completedBoard) {
+				void confirmMoveTaskToTrash(completedTask, completedBoard);
+			}
+		},
+		[confirmMoveTaskToTrash, setBoard],
+	);
+
+	const handleReopenTaskProcess = useCallback(
+		(taskId: string, notes: string, expectedStage?: string, agentOverride?: string, modelOverride?: string) => {
+			const trimmedNotes = notes.trim();
+			if (!trimmedNotes) {
+				notifyError("Process reopen notes are required.");
+				return;
+			}
+			const trimmedAgent = agentOverride?.trim();
+			if (!trimmedAgent) {
+				notifyError("Process reopen agent is required.");
+				return;
+			}
+			const trimmedModel = modelOverride?.trim();
+			let didUpdate = false;
+			let taskSessionStopId: string | null = null;
+			let errorMessage: string | null = null;
+			setBoard((currentBoard) => {
+				const selection = findCardSelection(currentBoard, taskId);
+				if (!selection?.card.process) {
+					errorMessage = `Task "${taskId}" does not have a process assigned.`;
+					return currentBoard;
+				}
+				if (expectedStage && selection.card.process.stageId !== expectedStage) {
+					errorMessage = `Task "${taskId}" is at process stage "${selection.card.process.stageId}", expected "${expectedStage}".`;
+					return currentBoard;
+				}
+				try {
+					const nextProcess = reopenTaskProcess(selection.card.process, {
+						notes: trimmedNotes,
+						definitions: currentBoard.processes ?? [],
+						agent: trimmedAgent,
+						...(trimmedModel ? { model: trimmedModel } : {}),
+					});
+					const updated = updateTaskProcess(currentBoard, taskId, nextProcess);
+					if (!updated.updated) {
+						return currentBoard;
+					}
+					didUpdate = true;
+					if (selection.column.id === "in_progress" || selection.column.id === "review") {
+						taskSessionStopId = taskId;
+					}
+					if (selection.column.id === "backlog") {
+						return updated.board;
+					}
+					const moved = moveTaskToColumn(updated.board, taskId, "backlog", { insertAtTop: true });
+					return moved.moved ? moved.board : updated.board;
+				} catch (error) {
+					errorMessage = error instanceof Error ? error.message : String(error);
+					return currentBoard;
+				}
+			});
+			if (errorMessage) {
+				notifyError(errorMessage);
+				return;
+			}
+			if (didUpdate) {
+				showAppToast({ intent: "success", message: "Process reopened.", timeout: 2500 });
+			}
+			if (taskSessionStopId) {
+				void stopTaskSession(taskSessionStopId);
+			}
+		},
+		[setBoard, stopTaskSession],
+	);
+
+	const editingTaskSelection = editingTaskId ? findCardSelection(board, editingTaskId) : null;
+	const inlineProcessActionCard =
+		editingTaskSelection?.card.process && editingTaskSelection.card.process.processId === editTaskProcessId
+			? editingTaskSelection.card
+			: undefined;
+
 	const inlineTaskEditor = editingTaskId ? (
 		<TaskInlineCreateCard
 			prompt={editTaskPrompt}
@@ -785,6 +1120,22 @@ export default function App(): ReactElement {
 			onAgentIdChange={setEditTaskAgentId}
 			clineSettings={editTaskClineSettings}
 			onClineSettingsChange={setEditTaskClineSettings}
+			processId={editTaskProcessId}
+			onProcessIdChange={setEditTaskProcessId}
+			processDefinitions={board.processes ?? []}
+			processActionCard={inlineProcessActionCard}
+			onAppendProcessNote={handleAppendProcessNote}
+			onTaskProcessVerdict={handleTaskProcessVerdict}
+			onRunProcessStage={(taskId) => {
+				if (editingTaskId === taskId) {
+					const savedTaskId = handleSaveEditedTask();
+					if (savedTaskId) {
+						setPendingTaskProcessRunAfterEditId(savedTaskId);
+					}
+					return;
+				}
+				void handleRunTaskProcessStage(taskId);
+			}}
 			defaultAgentId={runtimeProjectConfig?.selectedAgentId ?? null}
 			defaultProviderId={defaultTaskClineProviderId}
 			defaultModelId={runtimeProjectConfig?.clineProviderSettings?.modelId ?? null}
@@ -868,6 +1219,8 @@ export default function App(): ReactElement {
 						}
 						isTerminalOpen={selectedCard ? isDetailTerminalOpen : showHomeBottomTerminal}
 						isTerminalLoading={selectedCard ? isDetailTerminalStarting : isHomeTerminalStarting}
+						onOpenProcesses={hasNoProjects ? undefined : () => setIsProcessDefinitionsOpen(true)}
+						processCount={totalProcessCount}
 						onOpenSettings={handleOpenSettings}
 						showDebugButton={debugModeEnabled}
 						onOpenDebugDialog={debugModeEnabled ? handleOpenDebugDialog : undefined}
@@ -931,36 +1284,40 @@ export default function App(): ReactElement {
 												isDiscardWorkingChangesPending={isDiscardingHomeWorkingChanges}
 											/>
 										) : (
-											<KanbanBoard
-												data={board}
-												taskSessions={sessions}
-												workspacePath={workspacePath}
-												onCardSelect={handleCardSelect}
-												onCreateTask={handleOpenCreateTask}
-												onStartTask={handleStartTaskFromBoard}
-												onStartAllTasks={handleStartAllBacklogTasksFromBoard}
-												onClearTrash={handleOpenClearTrash}
-												editingTaskId={editingTaskId}
-												inlineTaskEditor={inlineTaskEditor}
-												onEditTask={handleOpenEditTask}
-												onSaveTaskTitle={handleSaveTaskTitle}
-												onCommitTask={handleCommitTask}
-												onOpenPrTask={handleOpenPrTask}
-												onCancelAutomaticTaskAction={handleCancelAutomaticTaskAction}
-												commitTaskLoadingById={commitTaskLoadingById}
-												openPrTaskLoadingById={openPrTaskLoadingById}
-												moveToTrashLoadingById={moveToTrashLoadingById}
-												onMoveToTrashTask={handleMoveReviewCardToTrash}
-												onRestoreFromTrashTask={handleRestoreTaskFromTrash}
-												dependencies={board.dependencies}
-												onCreateDependency={handleCreateDependency}
-												onDeleteDependency={handleDeleteDependency}
-												onRequestProgrammaticCardMoveReady={
-													selectedCard ? undefined : handleProgrammaticCardMoveReady
-												}
-												onDragEnd={handleDragEnd}
-												defaultClineModelId={runtimeProjectConfig?.clineProviderSettings?.modelId ?? null}
-											/>
+											<div className="flex min-h-0 min-w-0 flex-1 flex-col">
+												<KanbanBoard
+													data={board}
+													taskSessions={sessions}
+													workspacePath={workspacePath}
+													onCardSelect={handleCardSelect}
+													onCreateTask={handleOpenCreateTask}
+													onStartTask={handleStartTaskFromBoard}
+													onStartAllTasks={handleStartAllBacklogTasksFromBoard}
+													onClearTrash={handleOpenClearTrash}
+													editingTaskId={editingTaskId}
+													inlineTaskEditor={inlineTaskEditor}
+													onEditTask={handleOpenEditTask}
+													onSaveTaskTitle={handleSaveTaskTitle}
+													onCommitTask={handleCommitTask}
+													onOpenPrTask={handleOpenPrTask}
+													onCancelAutomaticTaskAction={handleCancelAutomaticTaskAction}
+													commitTaskLoadingById={commitTaskLoadingById}
+													openPrTaskLoadingById={openPrTaskLoadingById}
+													moveToTrashLoadingById={moveToTrashLoadingById}
+													onMoveToTrashTask={handleMoveReviewCardToTrash}
+													onRestoreFromTrashTask={handleRestoreTaskFromTrash}
+													dependencies={board.dependencies}
+													onCreateDependency={handleCreateDependency}
+													onDeleteDependency={handleDeleteDependency}
+													onRequestProgrammaticCardMoveReady={
+														selectedCard ? undefined : handleProgrammaticCardMoveReady
+													}
+													onDragEnd={handleDragEnd}
+													defaultClineModelId={
+														runtimeProjectConfig?.clineProviderSettings?.modelId ?? null
+													}
+												/>
+											</div>
 										)}
 									</div>
 									{showHomeBottomTerminal ? (
@@ -1047,6 +1404,12 @@ export default function App(): ReactElement {
 									onSendReviewComments={(taskId: string, text: string) => {
 										void handleSendReviewComments(taskId, text);
 									}}
+									onAppendProcessNote={handleAppendProcessNote}
+									onTaskProcessVerdict={handleTaskProcessVerdict}
+									onReopenTaskProcess={handleReopenTaskProcess}
+									onRunProcessStage={(taskId: string) => {
+										void handleRunTaskProcessStage(taskId);
+									}}
 									onSendClineChatMessage={sendTaskChatMessage}
 									onCancelClineChatTurn={cancelTaskChatTurn}
 									onLoadClineChatMessages={fetchTaskChatMessages}
@@ -1106,6 +1469,13 @@ export default function App(): ReactElement {
 					onShowStartupOnboardingDialog={handleShowStartupOnboardingDialog}
 					onResetAllState={handleResetAllState}
 				/>
+				<ProcessDefinitionsDialog
+					open={isProcessDefinitionsOpen}
+					onOpenChange={setIsProcessDefinitionsOpen}
+					processDefinitions={board.processes ?? []}
+					processUsageById={processUsageById}
+					onProcessDefinitionsChange={handleProcessDefinitionsChange}
+				/>
 				<TaskCreateDialog
 					open={isInlineTaskCreateOpen}
 					onOpenChange={handleCreateDialogOpenChange}
@@ -1133,6 +1503,9 @@ export default function App(): ReactElement {
 					onAgentIdChange={setNewTaskAgentId}
 					clineSettings={newTaskClineSettings}
 					onClineSettingsChange={setNewTaskClineSettings}
+					processId={newTaskProcessId}
+					onProcessIdChange={setNewTaskProcessId}
+					processDefinitions={board.processes ?? []}
 					defaultAgentId={runtimeProjectConfig?.selectedAgentId ?? null}
 					defaultProviderId={defaultTaskClineProviderId}
 					defaultModelId={runtimeProjectConfig?.clineProviderSettings?.modelId ?? null}

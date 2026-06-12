@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const prepareAgentLaunchMock = vi.hoisted(() => vi.fn());
 const ptySessionSpawnMock = vi.hoisted(() => vi.fn());
@@ -47,6 +47,10 @@ describe("TerminalSessionManager auto-restart", () => {
 			args: [...input.args],
 			env: {},
 		}));
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
 	});
 
 	it("restarts an attached agent session after it exits", async () => {
@@ -115,6 +119,49 @@ describe("TerminalSessionManager auto-restart", () => {
 		expect(ptySessionSpawnMock).toHaveBeenCalledTimes(1);
 		expect(manager.getSummary("task-1")?.state).toBe("awaiting_review");
 		expect(manager.getSummary("task-1")?.pid).toBeNull();
+	});
+
+	it("replaces an active agent session with a freshly spawned process", async () => {
+		const spawnedSessions: Array<ReturnType<typeof createMockPtySession>> = [];
+		ptySessionSpawnMock.mockImplementation((request: MockSpawnRequest) => {
+			const session = createMockPtySession(spawnedSessions.length === 0 ? 111 : 222, request);
+			spawnedSessions.push(session);
+			return session;
+		});
+
+		const manager = new TerminalSessionManager();
+		await manager.startTaskSession({
+			taskId: "task-1",
+			agentId: "codex",
+			binary: "codex",
+			args: [],
+			cwd: "/tmp/task-1",
+			prompt: "Current stage",
+		});
+
+		const replacementSummary = await manager.startTaskSession({
+			taskId: "task-1",
+			agentId: "codex",
+			binary: "codex",
+			args: [],
+			cwd: "/tmp/task-1",
+			prompt: "Next stage",
+			replaceActive: true,
+		});
+
+		expect(ptySessionSpawnMock).toHaveBeenCalledTimes(2);
+		expect(spawnedSessions[0]?.stop).toHaveBeenCalledTimes(1);
+		expect(replacementSummary.pid).toBe(222);
+		expect(manager.getSummary("task-1")?.pid).toBe(222);
+		expect(prepareAgentLaunchMock).toHaveBeenLastCalledWith(
+			expect.objectContaining({
+				prompt: "Next stage",
+			}),
+		);
+
+		spawnedSessions[0]?.triggerData("old output after replacement");
+		spawnedSessions[0]?.triggerExit(0);
+		expect(manager.getSummary("task-1")?.pid).toBe(222);
 	});
 
 	it("sends deferred Codex startup input when the prompt marker appears", async () => {

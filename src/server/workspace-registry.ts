@@ -319,7 +319,8 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 		const response = await loadWorkspaceState(workspacePath);
 		const terminalManager = await ensureTerminalManagerForWorkspace(workspaceId, workspacePath);
 		for (const summary of terminalManager.listSummaries()) {
-			response.sessions[summary.taskId] = summary;
+			response.sessions[summary.taskId] =
+				summary.state === "running" ? (terminalManager.recoverStaleSession(summary.taskId) ?? summary) : summary;
 		}
 		return response;
 	};

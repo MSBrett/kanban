@@ -1,8 +1,9 @@
 import { Draggable } from "@hello-pangea/dnd";
 import { getRuntimeAgentCatalogEntry } from "@runtime-agent-catalog";
 import { formatClineToolCallLabel } from "@runtime-cline-tool-call-display";
+import { getTaskProcessStage } from "@runtime-task-process";
 import { buildTaskWorktreeDisplayPath } from "@runtime-task-worktree-path";
-import { AlertCircle, AlertTriangle, Bot, GitBranch, Pencil, Play, RotateCcw, Trash2 } from "lucide-react";
+import { AlertCircle, AlertTriangle, Bot, GitBranch, Pencil, Play, RotateCcw, Trash2, Workflow } from "lucide-react";
 import type { KeyboardEvent, MouseEvent } from "react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -271,13 +272,21 @@ export function BoardCard({
 	const [isDescriptionExpanded, setIsDescriptionExpanded] = useState(false);
 	const reviewWorkspaceSnapshot = useTaskWorkspaceSnapshotValue(card.id);
 	const isTrashCard = columnId === "trash";
-	const isCardInteractive = !isTrashCard;
+	const isCompletedProcessTrashCard = isTrashCard && card.process?.status === "complete";
+	const isCardInteractive = !isTrashCard || Boolean(card.process);
 	const descriptionWidth = descriptionRect.width > 0 ? descriptionRect.width : descriptionWidthFallback;
-	const rawSessionActivity = useMemo(() => getCardSessionActivity(sessionSummary), [sessionSummary]);
+	const suppressSessionActivity = isCompletedProcessTrashCard;
+	const rawSessionActivity = useMemo(
+		() => getCardSessionActivity(suppressSessionActivity ? undefined : sessionSummary),
+		[sessionSummary, suppressSessionActivity],
+	);
 	const lastSessionActivityRef = useRef<CardSessionActivity | null>(null);
 	const lastSessionActivityCardIdRef = useRef<string | null>(null);
 	if (lastSessionActivityCardIdRef.current !== card.id) {
 		lastSessionActivityCardIdRef.current = card.id;
+		lastSessionActivityRef.current = null;
+	}
+	if (suppressSessionActivity) {
 		lastSessionActivityRef.current = null;
 	}
 	if (rawSessionActivity) {
@@ -466,6 +475,10 @@ export function BoardCard({
 		const parts = [agentOverrideLabel, modelOverrideLabel].filter((value): value is string => Boolean(value));
 		return parts.length > 0 ? parts.join(" · ") : null;
 	}, [agentOverrideLabel, modelOverrideLabel]);
+	const processStage = card.process ? getTaskProcessStage(card.process) : null;
+	const processBadgeLabel = card.process
+		? `${card.process.processName ?? card.process.processId}: ${processStage?.label ?? card.process.stageId}`
+		: null;
 
 	const activeDescriptionDisplay = isDescriptionExpanded ? descriptionDisplay.expanded : descriptionDisplay.collapsed;
 
@@ -631,18 +644,28 @@ export function BoardCard({
 									<Tooltip
 										side="bottom"
 										content={
-											<>
-												Restore session
-												<br />
-												in new worktree
-											</>
+											isCompletedProcessTrashCard ? (
+												<>
+													Open process
+													<br />
+													reopen panel
+												</>
+											) : (
+												<>
+													Restore session
+													<br />
+													in new worktree
+												</>
+											)
 										}
 									>
 										<Button
 											icon={<RotateCcw size={12} />}
 											variant="ghost"
 											size="sm"
-											aria-label="Restore task from done"
+											aria-label={
+												isCompletedProcessTrashCard ? "Open process reopen panel" : "Restore task from done"
+											}
 											onMouseDown={stopEvent}
 											onClick={(event) => {
 												stopEvent(event);
@@ -722,6 +745,21 @@ export function BoardCard({
 									>
 										<Bot size={12} className="shrink-0" />
 										<span className="truncate">{taskAgentSettingsLabel}</span>
+									</span>
+								</div>
+							) : null}
+							{processBadgeLabel ? (
+								<div className="mt-1">
+									<span
+										className={cn(
+											"inline-flex max-w-full items-center gap-1 rounded-md border px-1.5 py-0.5 text-xs",
+											card.process?.status === "complete"
+												? "border-status-green/40 bg-status-green/10 text-status-green"
+												: "border-status-purple/35 bg-status-purple/10 text-status-purple",
+										)}
+									>
+										<Workflow size={12} className="shrink-0" />
+										<span className="truncate">{processBadgeLabel}</span>
 									</span>
 								</div>
 							) : null}

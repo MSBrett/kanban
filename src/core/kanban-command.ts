@@ -1,3 +1,5 @@
+import { buildShellCommandLine } from "./shell";
+
 export interface RuntimeInvocationContext {
 	execPath: string;
 	argv: string[];
@@ -63,4 +65,9 @@ export function buildKanbanCommandParts(
 	},
 ): string[] {
 	return [...resolveKanbanCommandParts(context), ...args];
+}
+
+export function resolveKanbanCommandLine(context?: RuntimeInvocationContext): string {
+	const parts = resolveKanbanCommandParts(context);
+	return buildShellCommandLine(parts[0] ?? "kanban", parts.slice(1));
 }

@@ -67,6 +67,7 @@ export interface StartClineTaskSessionRequest {
 	images?: RuntimeTaskImage[];
 	resumeFromTrash?: boolean;
 	resumeFromPersistence?: boolean;
+	replaceActive?: boolean;
 	providerId?: string | null;
 	modelId?: string | null;
 	mode?: RuntimeTaskSessionMode;
@@ -325,7 +326,10 @@ export class InMemoryClineTaskSessionService implements ClineTaskSessionService 
 			existing &&
 			(existing.summary.state === "running" || existing.summary.state === "awaiting_review")
 		) {
-			return cloneSummary(existing.summary);
+			if (!request.replaceActive) {
+				return cloneSummary(existing.summary);
+			}
+			await this.stopTaskSession(request.taskId);
 		}
 
 		const providerId = request.providerId?.trim().toLowerCase() || SDK_DEFAULT_PROVIDER_ID;

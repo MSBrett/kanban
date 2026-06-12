@@ -1,4 +1,11 @@
 import type { DropResult } from "@hello-pangea/dnd";
+import {
+	advanceTaskProcessPastPassiveDispatchStages,
+	appendTaskProcessHistory,
+	buildTaskProcessStagePrompt,
+	getTaskProcessStage,
+	markTaskProcessRunning,
+} from "@runtime-task-process";
 import type { Dispatch, SetStateAction } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { notifyError, showAppToast } from "@/components/app-toaster";
@@ -13,9 +20,11 @@ import {
 	clearColumnTasks,
 	disableTaskAutoReview,
 	findCardSelection,
+	getBlockingDependencyTaskIds,
 	getTaskColumnId,
 	moveTaskToColumn,
 	updateTask,
+	updateTaskProcess,
 } from "@/state/board-state";
 import { clearTaskWorkspaceInfo, setTaskWorkspaceInfo } from "@/stores/workspace-metadata-store";
 import type { SendTerminalInputOptions } from "@/terminal/terminal-input";
@@ -53,6 +62,8 @@ interface UseBoardInteractionsInput {
 	selectedCard: SelectedBoardCard | null;
 	selectedTaskId: string | null;
 	currentProjectId: string | null;
+	workspacePath: string | null;
+	kanbanCommand: string | null;
 	setSelectedTaskId: Dispatch<SetStateAction<string | null>>;
 	setIsClearTrashDialogOpen: Dispatch<SetStateAction<boolean>>;
 	setIsGitHistoryOpen: Dispatch<SetStateAction<boolean>>;
@@ -79,6 +90,8 @@ export interface UseBoardInteractionsResult {
 	handleDragEnd: (result: DropResult, options?: { selectDroppedTask?: boolean }) => void;
 	handleStartTask: (taskId: string) => void;
 	handleStartAllBacklogTasks: (taskIds?: string[]) => void;
+	handleRunTaskProcessStage: (taskId: string) => Promise<boolean>;
+	handleRunReadyTaskProcessStages: (taskIds?: string[]) => void;
 	handleDetailTaskDragEnd: (result: DropResult) => void;
 	handleCardSelect: (taskId: string) => void;
 	handleMoveToTrash: () => void;
@@ -93,6 +106,62 @@ export interface UseBoardInteractionsResult {
 	trashTaskCount: number;
 }
 
+function buildProcessStageLaunchTask(
+	task: BoardCard,
+	board: BoardData,
+	workspacePath: string | null,
+	kanbanCommand: string | null,
+): {
+	task: BoardCard;
+	process: NonNullable<BoardCard["process"]>;
+	previousProcess: NonNullable<BoardCard["process"]>;
+} | null {
+	if (!task.process) {
+		return null;
+	}
+	if (task.process.status !== "ready") {
+		return null;
+	}
+	const now = Date.now();
+	const definitions = board.processes ?? [];
+	const dispatchReadyProcess = advanceTaskProcessPastPassiveDispatchStages(task.process, {
+		definitions,
+		now,
+	});
+	const stage = getTaskProcessStage(dispatchReadyProcess, definitions);
+	if (!stage || stage.terminal) {
+		return null;
+	}
+	const runningProcess =
+		dispatchReadyProcess.status === "running"
+			? dispatchReadyProcess
+			: markTaskProcessRunning(dispatchReadyProcess, {
+					now,
+					agent: "kanban",
+					notes: `Started ${stage.id} stage.`,
+				});
+	const prompt = buildTaskProcessStagePrompt({
+		taskId: task.id,
+		taskTitle: task.title,
+		taskPrompt: task.prompt,
+		process: runningProcess,
+		definitions,
+		workspacePath,
+		kanbanCommand,
+	});
+	return {
+		task: {
+			...task,
+			prompt,
+			startInPlanMode: false,
+			agentId: stage.agentId ?? task.agentId,
+			process: runningProcess,
+		},
+		process: runningProcess,
+		previousProcess: task.process,
+	};
+}
+
 export function useBoardInteractions({
 	board,
 	setBoard,
@@ -101,6 +170,8 @@ export function useBoardInteractions({
 	selectedCard,
 	selectedTaskId,
 	currentProjectId,
+	workspacePath,
+	kanbanCommand,
 	setSelectedTaskId,
 	setIsClearTrashDialogOpen,
 	setIsGitHistoryOpen,
@@ -290,6 +361,15 @@ export function useBoardInteractions({
 			options?: { optimisticMove?: boolean },
 		): Promise<boolean> => {
 			const optimisticMove = options?.optimisticMove ?? true;
+			if (fromColumnId === "backlog") {
+				const blockingTaskIds = getBlockingDependencyTaskIds(board, taskId);
+				if (blockingTaskIds.length > 0) {
+					notifyError(
+						`Task "${taskId}" is blocked by unfinished dependency task${blockingTaskIds.length === 1 ? "" : "s"}: ${blockingTaskIds.join(", ")}.`,
+					);
+					return false;
+				}
+			}
 			const ensured = await ensureTaskWorkspace(task);
 			if (!ensured.ok) {
 				notifyError(ensured.message ?? "Could not set up task workspace.");
@@ -330,9 +410,66 @@ export function useBoardInteractions({
 					setTaskWorkspaceInfo(infoAfterEnsure);
 				}
 			}
-			const started = await startTaskSession(task);
+			let processLaunch: ReturnType<typeof buildProcessStageLaunchTask>;
+			try {
+				processLaunch = buildProcessStageLaunchTask(task, board, workspacePath, kanbanCommand);
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				notifyError(message);
+				setBoard((currentBoard) => {
+					let nextBoard = currentBoard;
+					if (task.process) {
+						const failedLaunchProcess = appendTaskProcessHistory(
+							{
+								...task.process,
+								status: "ready",
+							},
+							{
+								agent: "kanban",
+								notes: `Stage handoff failed: ${message}`,
+							},
+						);
+						const updated = updateTaskProcess(nextBoard, taskId, failedLaunchProcess);
+						nextBoard = updated.updated ? updated.board : nextBoard;
+					}
+					if (optimisticMove && getTaskColumnId(nextBoard, taskId) === "in_progress") {
+						const reverted = moveTaskToColumn(nextBoard, taskId, fromColumnId);
+						nextBoard = reverted.moved ? reverted.board : nextBoard;
+					}
+					return nextBoard;
+				});
+				return false;
+			}
+			const taskForSession = processLaunch?.task ?? task;
+			if (processLaunch?.process) {
+				setBoard((currentBoard) => {
+					const updated = updateTaskProcess(currentBoard, taskId, processLaunch.process);
+					return updated.updated ? updated.board : currentBoard;
+				});
+			}
+			const started = processLaunch
+				? await startTaskSession(taskForSession, { replaceActive: true })
+				: await startTaskSession(taskForSession);
 			if (!started.ok) {
 				notifyError(started.message ?? "Could not start task session.");
+				if (processLaunch) {
+					const failedLaunchProcess = appendTaskProcessHistory(
+						{
+							...processLaunch.process,
+							status: "ready",
+						},
+						{
+							agent: "kanban",
+							notes: started.message?.trim()
+								? `Stage handoff failed: ${started.message.trim()}`
+								: "Stage handoff failed: Could not start task session.",
+						},
+					);
+					setBoard((currentBoard) => {
+						const updated = updateTaskProcess(currentBoard, taskId, failedLaunchProcess);
+						return updated.updated ? updated.board : currentBoard;
+					});
+				}
 				if (optimisticMove) {
 					setBoard((currentBoard) => {
 						const currentColumnId = getTaskColumnId(currentBoard, taskId);
@@ -357,13 +494,31 @@ export function useBoardInteractions({
 			}
 			return true;
 		},
-		[ensureTaskWorkspace, fetchTaskWorkspaceInfo, selectedTaskId, setBoard, startTaskSession],
+		[
+			board,
+			ensureTaskWorkspace,
+			fetchTaskWorkspaceInfo,
+			kanbanCommand,
+			selectedTaskId,
+			sessions,
+			setBoard,
+			startTaskSession,
+			stopTaskSession,
+			workspacePath,
+		],
 	);
 
 	const startBacklogTaskImmediately = useCallback(
 		async (task: BoardCard): Promise<boolean> => {
 			const selection = findCardSelection(board, task.id);
 			if (!selection || selection.column.id !== "backlog") {
+				return false;
+			}
+			const blockingTaskIds = getBlockingDependencyTaskIds(board, task.id);
+			if (blockingTaskIds.length > 0) {
+				notifyError(
+					`Task "${task.id}" is blocked by unfinished dependency task${blockingTaskIds.length === 1 ? "" : "s"}: ${blockingTaskIds.join(", ")}.`,
+				);
 				return false;
 			}
 
@@ -387,6 +542,13 @@ export function useBoardInteractions({
 		async (task: BoardCard): Promise<boolean> => {
 			if (selectedCard) {
 				return startBacklogTaskImmediately(task);
+			}
+			const blockingTaskIds = getBlockingDependencyTaskIds(board, task.id);
+			if (blockingTaskIds.length > 0) {
+				notifyError(
+					`Task "${task.id}" is blocked by unfinished dependency task${blockingTaskIds.length === 1 ? "" : "s"}: ${blockingTaskIds.join(", ")}.`,
+				);
+				return false;
 			}
 
 			await waitForBacklogCardHeightToSettle(task.id);
@@ -419,6 +581,7 @@ export function useBoardInteractions({
 			return completionPromise;
 		},
 		[
+			board,
 			kickoffTaskInProgress,
 			resolvePendingProgrammaticStartMove,
 			selectedCard,
@@ -439,11 +602,14 @@ export function useBoardInteractions({
 				if (previous && previous.updatedAt > summary.updatedAt) {
 					continue;
 				}
-				const columnId = getTaskColumnId(nextBoard, summary.taskId);
+				const selection = findCardSelection(nextBoard, summary.taskId);
+				const columnId = selection?.column.id ?? null;
 				if (summary.state === "awaiting_review" && columnId === "in_progress") {
-					const programmaticMoveAttempt = tryProgrammaticCardMove(summary.taskId, columnId, "review");
-					if (programmaticMoveAttempt === "started" || programmaticMoveAttempt === "blocked") {
-						continue;
+					if (!selection?.card.process) {
+						const programmaticMoveAttempt = tryProgrammaticCardMove(summary.taskId, columnId, "review");
+						if (programmaticMoveAttempt === "started" || programmaticMoveAttempt === "blocked") {
+							continue;
+						}
 					}
 					const moved = moveTaskToColumn(nextBoard, summary.taskId, "review", { insertAtTop: true });
 					if (moved.moved) {
@@ -452,11 +618,13 @@ export function useBoardInteractions({
 					continue;
 				}
 				if (summary.state === "running" && columnId === "review") {
-					const programmaticMoveAttempt = tryProgrammaticCardMove(summary.taskId, columnId, "in_progress", {
-						skipKickoff: true,
-					});
-					if (programmaticMoveAttempt === "started" || programmaticMoveAttempt === "blocked") {
-						continue;
+					if (!selection?.card.process) {
+						const programmaticMoveAttempt = tryProgrammaticCardMove(summary.taskId, columnId, "in_progress", {
+							skipKickoff: true,
+						});
+						if (programmaticMoveAttempt === "started" || programmaticMoveAttempt === "blocked") {
+							continue;
+						}
 					}
 					const moved = moveTaskToColumn(nextBoard, summary.taskId, "in_progress", { insertAtTop: true });
 					if (moved.moved) {
@@ -594,6 +762,20 @@ export function useBoardInteractions({
 			const { behavior: programmaticMoveBehavior, programmaticCardMoveInFlight } = consumeProgrammaticCardMove(
 				result.draggableId,
 			);
+			if (
+				result.type.startsWith("CARD") &&
+				result.destination?.droppableId === "in_progress" &&
+				result.source.droppableId === "backlog"
+			) {
+				const blockingTaskIds = getBlockingDependencyTaskIds(board, result.draggableId);
+				if (blockingTaskIds.length > 0) {
+					notifyError(
+						`Task "${result.draggableId}" is blocked by unfinished dependency task${blockingTaskIds.length === 1 ? "" : "s"}: ${blockingTaskIds.join(", ")}.`,
+					);
+					resolvePendingProgrammaticStartMove(result.draggableId, false);
+					return;
+				}
+			}
 
 			const applied = applyDragResult(board, result, { programmaticCardMoveInFlight });
 
@@ -680,6 +862,123 @@ export function useBoardInteractions({
 		[board, maybeRequestNotificationPermissionForTaskStart, startBacklogTaskWithAnimation],
 	);
 
+	const handleRunTaskProcessStage = useCallback(
+		async (taskId: string): Promise<boolean> => {
+			const selection = findCardSelection(board, taskId);
+			if (!selection || selection.column.id === "trash") {
+				return false;
+			}
+			if (!selection.card.process || selection.card.process.status !== "ready") {
+				return false;
+			}
+			maybeRequestNotificationPermissionForTaskStart();
+			if (selection.column.id === "backlog") {
+				return await startBacklogTaskImmediately(selection.card);
+			}
+			return await kickoffTaskInProgress(selection.card, taskId, selection.column.id, {
+				optimisticMove: false,
+			});
+		},
+		[board, kickoffTaskInProgress, maybeRequestNotificationPermissionForTaskStart, startBacklogTaskImmediately],
+	);
+
+	const handleRunReadyTaskProcessStages = useCallback(
+		(taskIds?: string[]) => {
+			const requestedTaskIds =
+				taskIds ??
+				board.columns.flatMap((column) =>
+					column.cards.filter((card) => card.process?.status === "ready").map((card) => card.id),
+				);
+			if (requestedTaskIds.length === 0) {
+				return;
+			}
+
+			let nextBoard = board;
+			const pendingStarts: Array<{
+				task: BoardCard;
+				taskId: string;
+				fromColumnId: BoardColumnId;
+				optimisticMove: boolean;
+			}> = [];
+			const startedTaskIds = new Set<string>();
+			let blockedTaskCount = 0;
+
+			for (const taskId of requestedTaskIds) {
+				if (!taskId || startedTaskIds.has(taskId)) {
+					continue;
+				}
+				const selection = findCardSelection(nextBoard, taskId);
+				if (!selection || selection.column.id === "trash") {
+					continue;
+				}
+				if (!selection.card.process || selection.card.process.status !== "ready") {
+					continue;
+				}
+				if (getBlockingDependencyTaskIds(nextBoard, taskId).length > 0) {
+					blockedTaskCount += 1;
+					continue;
+				}
+				if (selection.column.id === "backlog") {
+					const moved = moveTaskToColumn(nextBoard, taskId, "in_progress", { insertAtTop: true });
+					if (!moved.moved) {
+						continue;
+					}
+					nextBoard = moved.board;
+					const movedSelection = findCardSelection(nextBoard, taskId);
+					if (!movedSelection) {
+						continue;
+					}
+					pendingStarts.push({
+						task: movedSelection.card,
+						taskId,
+						fromColumnId: "backlog",
+						optimisticMove: true,
+					});
+					startedTaskIds.add(taskId);
+					continue;
+				}
+				pendingStarts.push({
+					task: selection.card,
+					taskId,
+					fromColumnId: selection.column.id,
+					optimisticMove: false,
+				});
+				startedTaskIds.add(taskId);
+			}
+
+			if (pendingStarts.length === 0) {
+				if (blockedTaskCount > 0) {
+					showAppToast({
+						intent: "warning",
+						icon: "warning-sign",
+						message: `${blockedTaskCount} process task${blockedTaskCount === 1 ? " is" : "s are"} blocked by dependencies.`,
+						timeout: 5000,
+					});
+				}
+				return;
+			}
+
+			if (nextBoard !== board) {
+				setBoard(nextBoard);
+			}
+			if (blockedTaskCount > 0) {
+				showAppToast({
+					intent: "warning",
+					icon: "warning-sign",
+					message: `${blockedTaskCount} process task${blockedTaskCount === 1 ? " was" : "s were"} skipped because of dependencies.`,
+					timeout: 5000,
+				});
+			}
+			maybeRequestNotificationPermissionForTaskStart();
+			for (const pendingStart of pendingStarts) {
+				void kickoffTaskInProgress(pendingStart.task, pendingStart.taskId, pendingStart.fromColumnId, {
+					optimisticMove: pendingStart.optimisticMove,
+				});
+			}
+		},
+		[board, kickoffTaskInProgress, maybeRequestNotificationPermissionForTaskStart, setBoard],
+	);
+
 	const handleStartAllBacklogTasks = useCallback(
 		(taskIds?: string[]) => {
 			const requestedTaskIds =
@@ -691,6 +990,7 @@ export function useBoardInteractions({
 			let nextBoard = board;
 			const pendingStarts: BoardCard[] = [];
 			const startedTaskIds = new Set<string>();
+			let blockedTaskCount = 0;
 
 			for (const taskId of requestedTaskIds) {
 				if (!taskId || startedTaskIds.has(taskId)) {
@@ -698,6 +998,10 @@ export function useBoardInteractions({
 				}
 				const selection = findCardSelection(nextBoard, taskId);
 				if (!selection || selection.column.id !== "backlog") {
+					continue;
+				}
+				if (getBlockingDependencyTaskIds(nextBoard, taskId).length > 0) {
+					blockedTaskCount += 1;
 					continue;
 				}
 				const moved = moveTaskToColumn(nextBoard, taskId, "in_progress", { insertAtTop: true });
@@ -714,10 +1018,26 @@ export function useBoardInteractions({
 			}
 
 			if (pendingStarts.length === 0) {
+				if (blockedTaskCount > 0) {
+					showAppToast({
+						intent: "warning",
+						icon: "warning-sign",
+						message: `${blockedTaskCount} backlog task${blockedTaskCount === 1 ? " is" : "s are"} blocked by dependencies.`,
+						timeout: 5000,
+					});
+				}
 				return;
 			}
 
 			setBoard(nextBoard);
+			if (blockedTaskCount > 0) {
+				showAppToast({
+					intent: "warning",
+					icon: "warning-sign",
+					message: `${blockedTaskCount} backlog task${blockedTaskCount === 1 ? " was" : "s were"} skipped because of dependencies.`,
+					timeout: 5000,
+				});
+			}
 			maybeRequestNotificationPermissionForTaskStart();
 			for (const task of pendingStarts) {
 				void kickoffTaskInProgress(task, task.id, "backlog");
@@ -736,7 +1056,7 @@ export function useBoardInteractions({
 	const handleCardSelect = useCallback(
 		(taskId: string) => {
 			const selection = findCardSelection(board, taskId);
-			if (!selection || selection.column.id === "trash") {
+			if (!selection || (selection.column.id === "trash" && !selection.card.process)) {
 				return;
 			}
 			setSelectedTaskId(taskId);
@@ -773,13 +1093,16 @@ export function useBoardInteractions({
 
 	const handleRestoreTaskFromTrash = useCallback(
 		(taskId: string) => {
-			const programmaticMoveAttempt = tryProgrammaticCardMove(taskId, "trash", "review");
-			if (programmaticMoveAttempt === "started" || programmaticMoveAttempt === "blocked") {
-				return;
-			}
-
 			const selection = findCardSelection(board, taskId);
 			if (!selection || selection.column.id !== "trash") {
+				return;
+			}
+			if (selection.card.process?.status === "complete") {
+				setSelectedTaskId(taskId);
+				return;
+			}
+			const programmaticMoveAttempt = tryProgrammaticCardMove(taskId, "trash", "review");
+			if (programmaticMoveAttempt === "started" || programmaticMoveAttempt === "blocked") {
 				return;
 			}
 
@@ -794,7 +1117,7 @@ export function useBoardInteractions({
 			}
 			void resumeTaskFromTrash(movedSelection.card, taskId, { optimisticMoveApplied: true });
 		},
-		[board, resumeTaskFromTrash, setBoard, tryProgrammaticCardMove],
+		[board, resumeTaskFromTrash, setBoard, setSelectedTaskId, tryProgrammaticCardMove],
 	);
 
 	const handleCancelAutomaticTaskAction = useCallback(
@@ -889,6 +1212,8 @@ export function useBoardInteractions({
 		handleDragEnd,
 		handleStartTask,
 		handleStartAllBacklogTasks,
+		handleRunTaskProcessStage,
+		handleRunReadyTaskProcessStages,
 		handleDetailTaskDragEnd,
 		handleCardSelect,
 		handleMoveToTrash,

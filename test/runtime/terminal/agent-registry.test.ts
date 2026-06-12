@@ -13,6 +13,7 @@ import {
 	buildRuntimeConfigResponse,
 	detectInstalledCommands,
 	resolveAgentCommand,
+	resolveBundledCodexCommandForPlatform,
 } from "../../../src/terminal/agent-registry";
 
 function createRuntimeConfigState(overrides: Partial<RuntimeConfigState> = {}): RuntimeConfigState {
@@ -54,6 +55,56 @@ describe("agent-registry", () => {
 		commandDiscoveryMocks.isBinaryAvailableOnPath.mockImplementation((binary: string) => binary === "npx");
 
 		const resolved = resolveAgentCommand(createRuntimeConfigState({ selectedAgentId: "claude" }));
+
+		expect(resolved).toBeNull();
+	});
+
+	it("uses the current bundled Codex package shim when the native package layout is valid", () => {
+		const root = "/repo/node_modules";
+		const executablePaths = new Set([
+			`${root}/@openai/codex/bin/codex.js`,
+			`${root}/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex`,
+		]);
+
+		const resolved = resolveBundledCodexCommandForPlatform({
+			platform: "darwin",
+			arch: "arm64",
+			resolvePackageJson: (packageName) => {
+				if (packageName === "@openai/codex") {
+					return `${root}/@openai/codex/package.json`;
+				}
+				if (packageName === "@openai/codex-darwin-arm64") {
+					return `${root}/@openai/codex-darwin-arm64/package.json`;
+				}
+				return null;
+			},
+			canExecute: (path) => executablePaths.has(path),
+		});
+
+		expect(resolved).toBe(`${root}/@openai/codex/bin/codex.js`);
+	});
+
+	it("rejects the obsolete bundled Codex layout that spawned a missing codex/codex binary", () => {
+		const root = "/repo/node_modules";
+		const executablePaths = new Set([
+			`${root}/@openai/codex/bin/codex.js`,
+			`${root}/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/codex/codex`,
+		]);
+
+		const resolved = resolveBundledCodexCommandForPlatform({
+			platform: "darwin",
+			arch: "arm64",
+			resolvePackageJson: (packageName) => {
+				if (packageName === "@openai/codex") {
+					return `${root}/@openai/codex/package.json`;
+				}
+				if (packageName === "@openai/codex-darwin-arm64") {
+					return `${root}/@openai/codex-darwin-arm64/package.json`;
+				}
+				return null;
+			},
+			canExecute: (path) => executablePaths.has(path),
+		});
 
 		expect(resolved).toBeNull();
 	});

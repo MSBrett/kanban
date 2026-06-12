@@ -1,3 +1,6 @@
+import { accessSync, constants } from "node:fs";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
 import type { RuntimeConfigState } from "../config/runtime-config";
 import { getRuntimeLaunchSupportedAgentCatalog, RUNTIME_AGENT_CATALOG } from "../core/agent-catalog";
 import type {
@@ -6,7 +9,19 @@ import type {
 	RuntimeClineProviderSettings,
 	RuntimeConfigResponse,
 } from "../core/api-contract";
+import { resolveKanbanCommandLine } from "../core/kanban-command";
 import { isBinaryAvailableOnPath } from "./command-discovery";
+
+const require = createRequire(import.meta.url);
+
+const CODEX_PLATFORM_PACKAGE_BY_TARGET: Record<string, string> = {
+	"x86_64-unknown-linux-musl": "@openai/codex-linux-x64",
+	"aarch64-unknown-linux-musl": "@openai/codex-linux-arm64",
+	"x86_64-apple-darwin": "@openai/codex-darwin-x64",
+	"aarch64-apple-darwin": "@openai/codex-darwin-arm64",
+	"x86_64-pc-windows-msvc": "@openai/codex-win32-x64",
+	"aarch64-pc-windows-msvc": "@openai/codex-win32-arm64",
+};
 
 export interface ResolvedAgentCommand {
 	agentId: RuntimeAgentId;
@@ -36,6 +51,108 @@ function joinCommand(binary: string, args: string[]): string {
 		return binary;
 	}
 	return [binary, ...args.map(quoteForDisplay)].join(" ");
+}
+
+function canExecuteFile(path: string): boolean {
+	try {
+		accessSync(path, process.platform === "win32" ? constants.F_OK : constants.X_OK);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+function resolvePackageJsonPath(packageName: string): string | null {
+	try {
+		return require.resolve(`${packageName}/package.json`);
+	} catch {
+		return null;
+	}
+}
+
+function resolveCodexTargetTriple(platform: NodeJS.Platform, arch: string): string | null {
+	if (platform === "darwin") {
+		if (arch === "arm64") {
+			return "aarch64-apple-darwin";
+		}
+		if (arch === "x64") {
+			return "x86_64-apple-darwin";
+		}
+		return null;
+	}
+	if (platform === "linux" || platform === "android") {
+		if (arch === "arm64") {
+			return "aarch64-unknown-linux-musl";
+		}
+		if (arch === "x64") {
+			return "x86_64-unknown-linux-musl";
+		}
+		return null;
+	}
+	if (platform === "win32") {
+		if (arch === "arm64") {
+			return "aarch64-pc-windows-msvc";
+		}
+		if (arch === "x64") {
+			return "x86_64-pc-windows-msvc";
+		}
+	}
+	return null;
+}
+
+export interface ResolveBundledCodexCommandOptions {
+	platform: NodeJS.Platform;
+	arch: string;
+	resolvePackageJson: (packageName: string) => string | null;
+	canExecute: (path: string) => boolean;
+}
+
+export function resolveBundledCodexCommandForPlatform({
+	platform,
+	arch,
+	resolvePackageJson,
+	canExecute,
+}: ResolveBundledCodexCommandOptions): string | null {
+	const targetTriple = resolveCodexTargetTriple(platform, arch);
+	if (!targetTriple) {
+		return null;
+	}
+	const platformPackage = CODEX_PLATFORM_PACKAGE_BY_TARGET[targetTriple];
+	if (!platformPackage) {
+		return null;
+	}
+	const packageJsonPath = resolvePackageJson("@openai/codex");
+	const platformPackageJsonPath = resolvePackageJson(platformPackage);
+	if (!packageJsonPath || !platformPackageJsonPath) {
+		return null;
+	}
+
+	const nativeBinary = join(
+		dirname(platformPackageJsonPath),
+		"vendor",
+		targetTriple,
+		"bin",
+		platform === "win32" ? "codex.exe" : "codex",
+	);
+	if (!canExecute(nativeBinary)) {
+		return null;
+	}
+
+	if (platform === "win32") {
+		return nativeBinary;
+	}
+
+	const packageShim = join(dirname(packageJsonPath), "bin", "codex.js");
+	return canExecute(packageShim) ? packageShim : nativeBinary;
+}
+
+function resolveBundledCodexCommand(): string | null {
+	return resolveBundledCodexCommandForPlatform({
+		platform: process.platform,
+		arch: process.arch,
+		resolvePackageJson: resolvePackageJsonPath,
+		canExecute: canExecuteFile,
+	});
 }
 
 function parseBooleanEnvValue(value: string | undefined): boolean {
@@ -95,6 +212,17 @@ export function resolveAgentCommand(runtimeConfig: RuntimeConfigState): Resolved
 			args: defaultArgs,
 		};
 	}
+	const bundledCodexCommand = selected.id === "codex" ? resolveBundledCodexCommand() : null;
+	if (bundledCodexCommand) {
+		const bundledCommand = joinCommand(bundledCodexCommand, defaultArgs);
+		return {
+			agentId: selected.id,
+			label: selected.label,
+			command: bundledCommand,
+			binary: bundledCodexCommand,
+			args: defaultArgs,
+		};
+	}
 	return null;
 }
 
@@ -120,6 +248,7 @@ export function buildRuntimeConfigResponse(
 		agents,
 		shortcuts: runtimeConfig.shortcuts,
 		clineProviderSettings,
+		kanbanCommand: resolveKanbanCommandLine(),
 		commitPromptTemplate: runtimeConfig.commitPromptTemplate,
 		openPrPromptTemplate: runtimeConfig.openPrPromptTemplate,
 		commitPromptTemplateDefault: runtimeConfig.commitPromptTemplateDefault,
