@@ -614,6 +614,7 @@ export default function App(): ReactElement {
 		handleCardSelect,
 		handleMoveToTrash,
 		handleMoveReviewCardToTrash,
+		handleDeleteTask,
 		handleRestoreTaskFromTrash,
 		handleCancelAutomaticTaskAction,
 		handleOpenClearTrash,
@@ -1305,6 +1306,7 @@ export default function App(): ReactElement {
 													openPrTaskLoadingById={openPrTaskLoadingById}
 													moveToTrashLoadingById={moveToTrashLoadingById}
 													onMoveToTrashTask={handleMoveReviewCardToTrash}
+													onDeleteTask={handleDeleteTask}
 													onRestoreFromTrashTask={handleRestoreTaskFromTrash}
 													dependencies={board.dependencies}
 													onCreateDependency={handleCreateDependency}

@@ -220,6 +220,7 @@ export function BoardCard({
 	onClick,
 	onStart,
 	onMoveToTrash,
+	onDelete,
 	onRestoreFromTrash,
 	onSaveTitle,
 	onCommit,
@@ -244,6 +245,7 @@ export function BoardCard({
 	onClick?: () => void;
 	onStart?: (taskId: string) => void;
 	onMoveToTrash?: (taskId: string) => void;
+	onDelete?: (taskId: string) => void;
 	onRestoreFromTrash?: (taskId: string) => void;
 	onSaveTitle?: (taskId: string, title: string) => void;
 	onCommit?: (taskId: string) => void;
@@ -476,6 +478,7 @@ export function BoardCard({
 		return parts.length > 0 ? parts.join(" · ") : null;
 	}, [agentOverrideLabel, modelOverrideLabel]);
 	const processStage = card.process ? getTaskProcessStage(card.process) : null;
+	const hasIncompleteProcess = Boolean(card.process && card.process.status !== "complete");
 	const processBadgeLabel = card.process
 		? `${card.process.processName ?? card.process.processId}: ${processStage?.label ?? card.process.stageId}`
 		: null;
@@ -615,6 +618,21 @@ export function BoardCard({
 										</p>
 									)}
 								</div>
+								{hasIncompleteProcess && !isTrashCard ? (
+									<Button
+										icon={<Trash2 size={13} />}
+										variant="ghost"
+										size="sm"
+										className="text-status-red hover:text-status-red"
+										aria-label="Delete task"
+										title="Delete incomplete process task"
+										onMouseDown={stopEvent}
+										onClick={(event) => {
+											stopEvent(event);
+											onDelete?.(card.id);
+										}}
+									/>
+								) : null}
 								{columnId === "backlog" ? (
 									<Button
 										icon={<Play size={14} />}
@@ -627,7 +645,7 @@ export function BoardCard({
 											onStart?.(card.id);
 										}}
 									/>
-								) : columnId === "review" ? (
+								) : columnId === "review" && !hasIncompleteProcess ? (
 									<Button
 										icon={isMoveToTrashLoading ? <Spinner size={13} /> : <Trash2 size={13} />}
 										variant="ghost"

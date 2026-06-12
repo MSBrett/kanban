@@ -14,6 +14,7 @@ import { useLinkedBacklogTaskActions } from "@/hooks/use-linked-backlog-task-act
 import { useProgrammaticCardMoves } from "@/hooks/use-programmatic-card-moves";
 import { useReviewAutoActions } from "@/hooks/use-review-auto-actions";
 import type { UseTaskSessionsResult } from "@/hooks/use-task-sessions";
+import { getDetailTerminalTaskId } from "@/hooks/use-terminal-panels";
 import type { RuntimeTaskSessionSummary, RuntimeTaskWorkspaceInfoResponse } from "@/runtime/types";
 import {
 	applyDragResult,
@@ -23,6 +24,7 @@ import {
 	getBlockingDependencyTaskIds,
 	getTaskColumnId,
 	moveTaskToColumn,
+	removeTask,
 	updateTask,
 	updateTaskProcess,
 } from "@/state/board-state";
@@ -96,6 +98,7 @@ export interface UseBoardInteractionsResult {
 	handleCardSelect: (taskId: string) => void;
 	handleMoveToTrash: () => void;
 	handleMoveReviewCardToTrash: (taskId: string) => void;
+	handleDeleteTask: (taskId: string) => void;
 	handleRestoreTaskFromTrash: (taskId: string) => void;
 	handleCancelAutomaticTaskAction: (taskId: string) => void;
 	handleOpenClearTrash: () => void;
@@ -1091,6 +1094,36 @@ export function useBoardInteractions({
 		[requestMoveTaskToTrashWithAnimation, setTaskMoveToTrashLoading],
 	);
 
+	const handleDeleteTask = useCallback(
+		(taskId: string) => {
+			const selection = findCardSelection(board, taskId);
+			if (!selection) {
+				return;
+			}
+			setBoard((currentBoard) => {
+				const removed = removeTask(currentBoard, taskId);
+				return removed.removed ? removed.board : currentBoard;
+			});
+			setSessions((currentSessions) => {
+				if (!currentSessions[taskId]) {
+					return currentSessions;
+				}
+				const nextSessions = { ...currentSessions };
+				delete nextSessions[taskId];
+				return nextSessions;
+			});
+			if (selectedTaskId === taskId) {
+				setSelectedTaskId(null);
+				clearTaskWorkspaceInfo(taskId);
+			}
+			void (async () => {
+				await Promise.all([stopTaskSession(taskId), stopTaskSession(getDetailTerminalTaskId(taskId))]);
+				await cleanupTaskWorkspace(taskId);
+			})();
+		},
+		[board, cleanupTaskWorkspace, selectedTaskId, setBoard, setSelectedTaskId, setSessions, stopTaskSession],
+	);
+
 	const handleRestoreTaskFromTrash = useCallback(
 		(taskId: string) => {
 			const selection = findCardSelection(board, taskId);
@@ -1218,6 +1251,7 @@ export function useBoardInteractions({
 		handleCardSelect,
 		handleMoveToTrash,
 		handleMoveReviewCardToTrash,
+		handleDeleteTask,
 		handleRestoreTaskFromTrash,
 		handleCancelAutomaticTaskAction,
 		handleOpenClearTrash,

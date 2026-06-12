@@ -548,7 +548,9 @@ export function CardDetailView({
 	const detailDiffFileTreePanelPercent = `${(detailDiffFileTreeRatio * 100).toFixed(1)}%`;
 	const detailDiffContentPanelPercent = `${((1 - detailDiffFileTreeRatio) * 100).toFixed(1)}%`;
 	const detailDiffFileTreePanelFlex = `0 0 ${detailDiffFileTreePanelPercent}`;
-	const showMoveToTrashActions = selection.column.id === "review" || selection.column.id === "in_progress";
+	const hasIncompleteProcess = Boolean(selection.card.process && selection.card.process.status !== "complete");
+	const showMoveToTrashActions =
+		(selection.column.id === "review" || selection.column.id === "in_progress") && !hasIncompleteProcess;
 	const isTaskTerminalEnabled = selection.column.id === "in_progress" || selection.column.id === "review";
 	const effectiveTaskAgentId = sessionSummary?.agentId ?? selection.card.agentId ?? selectedAgentId;
 	const showClineAgentChatPanel = isNativeClineAgentSelected(effectiveTaskAgentId);
