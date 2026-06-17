@@ -55,7 +55,7 @@ describe("listAgentModels – codex", () => {
 		]);
 	});
 
-	it("excludes hidden and non-api codex-internal models", async () => {
+	it("includes listed models even when not API-supported, but excludes hidden codex-internal models", async () => {
 		writeCache({
 			models: [
 				{ slug: "gpt-5.5", display_name: "GPT-5.5", visibility: "list", supported_in_api: true },
@@ -65,7 +65,10 @@ describe("listAgentModels – codex", () => {
 		});
 
 		const models = await listAgentModels("codex");
-		expect(models.map((model) => model.id)).toEqual(["gpt-5.5"]);
+		// gpt-5.3-codex-spark is shown in codex's own picker (visibility=list) so
+		// it must appear even though supported_in_api is false; the hidden
+		// auto-review model is excluded.
+		expect(models.map((model) => model.id)).toEqual(["gpt-5.5", "gpt-5.3-codex-spark"]);
 	});
 
 	it("returns an empty list when the cache is missing or malformed", async () => {

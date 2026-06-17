@@ -240,12 +240,14 @@ async function loadCodexModels(): Promise<RuntimeAgentModelInfo[]> {
 		if (!slug) {
 			continue;
 		}
-		// Hidden / non-API models are codex-internal (e.g. auto-review) and not
-		// selectable by the user.
+		// Mirror codex's own model picker, which shows entries whose
+		// `visibility` is "list". Hidden entries (e.g. the internal
+		// "codex-auto-review" model) are not user-selectable. We intentionally
+		// do NOT gate on `supported_in_api`: Kanban launches codex as an
+		// interactive TUI via `-m`, where any listed model is selectable, so a
+		// model like gpt-5.3-codex-spark (listed but supported_in_api=false)
+		// must still appear.
 		if (entry.visibility !== undefined && entry.visibility !== "list") {
-			continue;
-		}
-		if (entry.supported_in_api === false) {
 			continue;
 		}
 		const reasoningEfforts = Array.isArray(entry.supported_reasoning_levels)
