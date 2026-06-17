@@ -6,6 +6,8 @@ import { initTRPC, TRPCError } from "@trpc/server";
 import { z } from "zod";
 
 import type {
+	RuntimeAgentModelsRequest,
+	RuntimeAgentModelsResponse,
 	RuntimeClineAccountBalanceResponse,
 	RuntimeClineAccountOrganizationsResponse,
 	RuntimeClineAccountProfileResponse,
@@ -97,6 +99,8 @@ import type {
 	RuntimeWorktreeEnsureResponse,
 } from "../core/api-contract";
 import {
+	runtimeAgentModelsRequestSchema,
+	runtimeAgentModelsResponseSchema,
 	runtimeClineAccountBalanceResponseSchema,
 	runtimeClineAccountOrganizationsResponseSchema,
 	runtimeClineAccountProfileResponseSchema,
@@ -265,6 +269,10 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope | null,
 			input: RuntimeClineProviderModelsRequest,
 		) => Promise<RuntimeClineProviderModelsResponse>;
+		getAgentModels: (
+			scope: RuntimeTrpcWorkspaceScope | null,
+			input: RuntimeAgentModelsRequest,
+		) => Promise<RuntimeAgentModelsResponse>;
 		runClineProviderOAuthLogin: (
 			scope: RuntimeTrpcWorkspaceScope | null,
 			input: RuntimeClineOauthLoginRequest,
@@ -537,6 +545,12 @@ export const runtimeAppRouter = t.router({
 			.output(runtimeClineProviderModelsResponseSchema)
 			.query(async ({ ctx, input }) => {
 				return await ctx.runtimeApi.getClineProviderModels(ctx.workspaceScope, input);
+			}),
+		getAgentModels: t.procedure
+			.input(runtimeAgentModelsRequestSchema)
+			.output(runtimeAgentModelsResponseSchema)
+			.query(async ({ ctx, input }) => {
+				return await ctx.runtimeApi.getAgentModels(ctx.workspaceScope, input);
 			}),
 		getClineMcpAuthStatuses: t.procedure.output(runtimeClineMcpAuthStatusResponseSchema).query(async ({ ctx }) => {
 			return await ctx.runtimeApi.getClineMcpAuthStatuses(ctx.workspaceScope);

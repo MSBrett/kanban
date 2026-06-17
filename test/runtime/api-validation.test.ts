@@ -136,19 +136,24 @@ describe("parseTaskSessionStartRequest", () => {
 		}
 	});
 
-	it("rejects unsupported Copilot reasoning effort levels", () => {
+	it("accepts an arbitrary agent reasoning effort string (validated per-model in the UI)", () => {
+		// Reasoning efforts are now sourced live per-model from each agent's own
+		// catalog (copilot via its SDK, codex via its on-disk cache), so the
+		// contract no longer pins a fixed enum — the UI constrains choices to the
+		// selected model's declared efforts. Codex, for example, exposes no
+		// "none"/"max" levels, so a shared enum would be wrong.
 		expect(() =>
 			parseTaskSessionStartRequest({
 				taskId: "task-1",
-				prompt: "Implement the Copilot adapter",
+				prompt: "Implement the Codex adapter",
 				baseRef: "main",
-				agentId: "copilot",
+				agentId: "codex",
 				agentSettings: {
-					modelId: "gpt-5.2",
-					reasoningEffort: "ultra",
+					modelId: "gpt-5.5",
+					reasoningEffort: "xhigh",
 				},
 			}),
-		).toThrow();
+		).not.toThrow();
 	});
 
 	it("preserves generic task agent settings through board state normalization", () => {

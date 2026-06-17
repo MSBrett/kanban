@@ -749,6 +749,15 @@ const codexAdapter: AgentSessionAdapter = {
 			codexArgs.push("--dangerously-bypass-approvals-and-sandbox");
 		}
 
+		const codexModelId = input.agentSettings?.modelId?.trim();
+		if (codexModelId && !hasCliOption(codexArgs, "--model") && !hasCliOption(codexArgs, "-m")) {
+			codexArgs.push("--model", codexModelId);
+		}
+		const codexReasoningEffort = input.agentSettings?.reasoningEffort?.trim();
+		if (codexReasoningEffort && !hasCodexConfigOverride(codexArgs, "model_reasoning_effort")) {
+			codexArgs.push("-c", `model_reasoning_effort=${codexReasoningEffort}`);
+		}
+
 		if (input.resumeFromTrash) {
 			if (!codexArgs.includes("resume")) {
 				codexArgs.push("resume");

@@ -200,6 +200,40 @@ describe("prepareAgentLaunch hook strategies", () => {
 		expect(getCodexConfigOverrideValues(launch.args, "check_for_update_on_startup")).toEqual(["true"]);
 	});
 
+	it("passes Codex model and reasoning effort from agent settings", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-codex-model",
+			agentId: "codex",
+			binary: "codex",
+			args: [],
+			cwd: "/tmp",
+			prompt: "",
+			agentSettings: { modelId: "gpt-5.5", reasoningEffort: "xhigh" },
+		});
+
+		const modelIndex = launch.args.indexOf("--model");
+		expect(modelIndex).toBeGreaterThanOrEqual(0);
+		expect(launch.args[modelIndex + 1]).toBe("gpt-5.5");
+		expect(getCodexConfigOverrideValues(launch.args, "model_reasoning_effort")).toEqual(["xhigh"]);
+	});
+
+	it("does not override an explicit Codex model or reasoning flag", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-codex-explicit-model",
+			agentId: "codex",
+			binary: "codex",
+			args: ["-m", "o3", "-c", "model_reasoning_effort=high"],
+			cwd: "/tmp",
+			prompt: "",
+			agentSettings: { modelId: "gpt-5.5", reasoningEffort: "xhigh" },
+		});
+
+		expect(launch.args).not.toContain("--model");
+		expect(getCodexConfigOverrideValues(launch.args, "model_reasoning_effort")).toEqual(["high"]);
+	});
+
 	it("writes Claude settings with explicit permission hook", async () => {
 		setupTempHome();
 		await prepareAgentLaunch({

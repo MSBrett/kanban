@@ -180,6 +180,8 @@ export function TaskInlineCreateCard({
 		isLoadingProviders,
 		isLoadingModels,
 		providerDefaultModels,
+		agentModels,
+		isLoadingAgentModels,
 	} = useTaskAgentModelPicker({
 		active: true,
 		workspaceId,
@@ -382,6 +384,8 @@ export function TaskInlineCreateCard({
 						defaultProviderId={defaultProviderId}
 						defaultReasoningEffort={defaultReasoningEffort}
 						providerDefaultModels={providerDefaultModels}
+						agentModels={agentModels}
+						isLoadingAgentModels={isLoadingAgentModels}
 						onPopoverOpenChange={setIsModelPickerPopoverOpen}
 					/>
 				) : null}

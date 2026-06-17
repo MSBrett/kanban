@@ -4,6 +4,7 @@
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type {
 	RuntimeAgentId,
+	RuntimeAgentModelInfo,
 	RuntimeClineAccountBalanceResponse,
 	RuntimeClineAccountOrganizationsResponse,
 	RuntimeClineAccountProfileResponse,
@@ -151,6 +152,15 @@ export async function fetchClineProviderModels(
 ): Promise<RuntimeClineProviderModel[]> {
 	const trpcClient = getRuntimeTrpcClient(workspaceId);
 	const response = await trpcClient.runtime.getClineProviderModels.query({ providerId });
+	return response.models;
+}
+
+export async function fetchAgentModels(
+	workspaceId: string | null,
+	agentId: RuntimeAgentId,
+): Promise<RuntimeAgentModelInfo[]> {
+	const trpcClient = getRuntimeTrpcClient(workspaceId);
+	const response = await trpcClient.runtime.getAgentModels.query({ agentId });
 	return response.models;
 }
 

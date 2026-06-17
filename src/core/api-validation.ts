@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import {
+	type RuntimeAgentModelsRequest,
 	type RuntimeClineAccountSwitchRequest,
 	type RuntimeClineAddProviderRequest,
 	type RuntimeClineDeviceAuthCompleteRequest,
@@ -43,6 +44,7 @@ import {
 	runtimeClineProviderSettingsSaveRequestSchema,
 	runtimeClineUpdateProviderRequestSchema,
 	runtimeCommandRunRequestSchema,
+	runtimeAgentModelsRequestSchema,
 	runtimeConfigSaveRequestSchema,
 	runtimeDirectoryListRequestSchema,
 	runtimeGitCheckoutRequestSchema,
@@ -329,6 +331,10 @@ export function parseClineProviderModelsRequest(value: unknown): RuntimeClinePro
 	return {
 		providerId,
 	};
+}
+
+export function parseAgentModelsRequest(value: unknown): RuntimeAgentModelsRequest {
+	return parseWithSchema(runtimeAgentModelsRequestSchema, value);
 }
 
 export function parseClineAddProviderRequest(value: unknown): RuntimeClineAddProviderRequest {

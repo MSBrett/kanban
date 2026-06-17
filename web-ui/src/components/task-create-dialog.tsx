@@ -202,6 +202,8 @@ export function TaskCreateDialog({
 		isLoadingProviders,
 		isLoadingModels,
 		providerDefaultModels,
+		agentModels,
+		isLoadingAgentModels,
 	} = useTaskAgentModelPicker({
 		active: open,
 		workspaceId,
@@ -631,6 +633,8 @@ export function TaskCreateDialog({
 							defaultProviderId={defaultProviderId}
 							defaultReasoningEffort={defaultReasoningEffort}
 							providerDefaultModels={providerDefaultModels}
+							agentModels={agentModels}
+							isLoadingAgentModels={isLoadingAgentModels}
 						/>
 					) : null}
 				</div>

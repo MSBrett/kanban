@@ -20,6 +20,7 @@ import type {
 	RuntimeUpdateStatusResponse,
 } from "../core/api-contract";
 import {
+	parseAgentModelsRequest,
 	parseClineAccountSwitchRequest,
 	parseClineAddProviderRequest,
 	parseClineDeviceAuthCompleteRequest,
@@ -44,6 +45,7 @@ import {
 import { isHomeAgentSessionId } from "../core/home-agent-session";
 import { resolveTaskTitle } from "../core/task-title.js";
 import { openInBrowser } from "../server/browser";
+import { listAgentModels } from "../terminal/agent-model-catalog";
 import { buildRuntimeConfigResponse, resolveAgentCommand } from "../terminal/agent-registry";
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import { resolveTaskCwd } from "../workspace/task-worktree";
@@ -535,6 +537,14 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 		getClineProviderModels: async (_workspaceScope, input) => {
 			const body = parseClineProviderModelsRequest(input);
 			return await clineProviderService.getProviderModels(body.providerId);
+		},
+		getAgentModels: async (_workspaceScope, input) => {
+			const body = parseAgentModelsRequest(input);
+			const models = await listAgentModels(body.agentId);
+			return {
+				agentId: body.agentId,
+				models,
+			};
 		},
 		getClineMcpAuthStatuses: async (_workspaceScope) => {
 			const statuses = await clineMcpRuntimeService.getAuthStatuses();

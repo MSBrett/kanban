@@ -108,9 +108,13 @@ export type RuntimeTaskClineSettings = z.infer<typeof runtimeTaskClineSettingsSc
 
 export const runtimeCopilotReasoningEffortSchema = z.enum(["none", "low", "medium", "high", "xhigh", "max"]);
 export type RuntimeCopilotReasoningEffort = z.infer<typeof runtimeCopilotReasoningEffortSchema>;
+// Reasoning effort for terminal agents (copilot, codex) is sourced dynamically
+// per-model from the agent's own model catalog, so the stored value is an
+// open string validated against the fetched efforts in the UI rather than a
+// fixed enum. Kept permissive for forward-compat as new agents/levels appear.
 export const runtimeTaskAgentSettingsSchema = z.object({
 	modelId: z.string().optional(),
-	reasoningEffort: runtimeCopilotReasoningEffortSchema.optional(),
+	reasoningEffort: z.string().optional(),
 });
 export type RuntimeTaskAgentSettings = z.infer<typeof runtimeTaskAgentSettingsSchema>;
 
@@ -954,6 +958,30 @@ export const runtimeClineProviderModelsResponseSchema = z.object({
 	models: z.array(runtimeClineProviderModelSchema),
 });
 export type RuntimeClineProviderModelsResponse = z.infer<typeof runtimeClineProviderModelsResponseSchema>;
+
+// Model catalog for terminal agents (copilot, codex). Sourced live from each
+// agent's own install — copilot via its SDK `models.list`, codex via its
+// on-disk models cache — so model ids and per-model reasoning efforts are never
+// hardcoded in Kanban.
+export const runtimeAgentModelsRequestSchema = z.object({
+	agentId: runtimeAgentIdSchema,
+});
+export type RuntimeAgentModelsRequest = z.infer<typeof runtimeAgentModelsRequestSchema>;
+
+export const runtimeAgentModelInfoSchema = z.object({
+	id: z.string(),
+	label: z.string(),
+	supportsReasoning: z.boolean(),
+	reasoningEfforts: z.array(z.string()),
+	defaultReasoningEffort: z.string().nullable().optional(),
+});
+export type RuntimeAgentModelInfo = z.infer<typeof runtimeAgentModelInfoSchema>;
+
+export const runtimeAgentModelsResponseSchema = z.object({
+	agentId: runtimeAgentIdSchema,
+	models: z.array(runtimeAgentModelInfoSchema),
+});
+export type RuntimeAgentModelsResponse = z.infer<typeof runtimeAgentModelsResponseSchema>;
 
 export const runtimeClineProviderCapabilitySchema = z.enum([
 	"streaming",

@@ -13,16 +13,24 @@ import {
 import { SearchSelectDropdown } from "@/components/search-select-dropdown";
 import { cn } from "@/components/ui/cn";
 import { NativeSelect } from "@/components/ui/native-select";
-import { fetchClineProviderCatalog, fetchClineProviderModels } from "@/runtime/runtime-config-query";
+import { fetchAgentModels, fetchClineProviderCatalog, fetchClineProviderModels } from "@/runtime/runtime-config-query";
 import type {
 	RuntimeAgentId,
+	RuntimeAgentModelInfo,
 	RuntimeClineProviderCatalogItem,
 	RuntimeClineProviderModel,
 	RuntimeClineReasoningEffort,
-	RuntimeCopilotReasoningEffort,
 	RuntimeTaskAgentSettings,
 	RuntimeTaskClineSettings,
 } from "@/runtime/types";
+
+// Terminal agents (copilot, codex) whose model + reasoning catalog is sourced
+// live from the agent's own install via runtime.getAgentModels.
+const TERMINAL_AGENT_MODEL_IDS: ReadonlySet<RuntimeAgentId> = new Set<RuntimeAgentId>(["copilot", "codex"]);
+
+function isTerminalAgentWithModelCatalog(agentId: RuntimeAgentId | null): agentId is RuntimeAgentId {
+	return agentId !== null && TERMINAL_AGENT_MODEL_IDS.has(agentId);
+}
 
 // ---------------------------------------------------------------------------
 // Hook: manages fetch state for Cline provider catalog + model lists
@@ -51,6 +59,9 @@ export interface UseTaskAgentModelPickerResult {
 	isLoadingModels: boolean;
 	/** Map of provider ID → its default model ID (from the provider catalog). */
 	providerDefaultModels: Record<string, string>;
+	/** Live model catalog for the selected terminal agent (copilot/codex). */
+	agentModels: RuntimeAgentModelInfo[];
+	isLoadingAgentModels: boolean;
 }
 
 export function useTaskAgentModelPicker({
@@ -66,9 +77,42 @@ export function useTaskAgentModelPicker({
 	const [providerModels, setProviderModels] = useState<RuntimeClineProviderModel[]>([]);
 	const [isLoadingProviders, setIsLoadingProviders] = useState(false);
 	const [isLoadingModels, setIsLoadingModels] = useState(false);
+	const [agentModels, setAgentModels] = useState<RuntimeAgentModelInfo[]>([]);
+	const [isLoadingAgentModels, setIsLoadingAgentModels] = useState(false);
 
 	// Derive the effective agent: explicit override takes precedence, then the global default
 	const effectiveAgentId = agentId ?? defaultAgentId ?? null;
+
+	// Fetch the live model catalog for terminal agents (copilot, codex). The
+	// list and per-model reasoning efforts come from the agent's own install, so
+	// the picker never hardcodes model ids or reasoning levels.
+	useEffect(() => {
+		if (!active || !isTerminalAgentWithModelCatalog(effectiveAgentId)) {
+			setAgentModels([]);
+			return;
+		}
+		let cancelled = false;
+		setIsLoadingAgentModels(true);
+		void fetchAgentModels(workspaceId, effectiveAgentId)
+			.then((models) => {
+				if (!cancelled) {
+					setAgentModels(models);
+				}
+			})
+			.catch(() => {
+				if (!cancelled) {
+					setAgentModels([]);
+				}
+			})
+			.finally(() => {
+				if (!cancelled) {
+					setIsLoadingAgentModels(false);
+				}
+			});
+		return () => {
+			cancelled = true;
+		};
+	}, [active, effectiveAgentId, workspaceId]);
 
 	useEffect(() => {
 		if (!active || effectiveAgentId !== "cline") {
@@ -206,6 +250,8 @@ export function useTaskAgentModelPicker({
 		isLoadingProviders,
 		isLoadingModels,
 		providerDefaultModels,
+		agentModels,
+		isLoadingAgentModels,
 	};
 }
 
@@ -233,17 +279,8 @@ function cloneTaskAgentSettings(settings?: RuntimeTaskAgentSettings): RuntimeTas
 	};
 }
 
-const COPILOT_REASONING_EFFORT_OPTIONS: Array<{ value: RuntimeCopilotReasoningEffort; label: string }> = [
-	{ value: "none", label: "none" },
-	{ value: "low", label: "low" },
-	{ value: "medium", label: "medium" },
-	{ value: "high", label: "high" },
-	{ value: "xhigh", label: "xhigh" },
-	{ value: "max", label: "max" },
-];
-
 // ---------------------------------------------------------------------------
-// Component: renders Agent, Cline provider, and Cline model pickers
+// Component: renders Agent, Cline provider/model, and terminal-agent model pickers
 // ---------------------------------------------------------------------------
 
 export function TaskAgentModelPicker({
@@ -265,6 +302,8 @@ export function TaskAgentModelPicker({
 	defaultProviderId,
 	defaultReasoningEffort,
 	providerDefaultModels,
+	agentModels = [],
+	isLoadingAgentModels = false,
 }: {
 	agentId: RuntimeAgentId | undefined;
 	onAgentIdChange: (value: RuntimeAgentId | undefined) => void;
@@ -288,12 +327,15 @@ export function TaskAgentModelPicker({
 	defaultReasoningEffort?: RuntimeClineReasoningEffort | null;
 	/** Map of provider ID → its default model ID (from the provider catalog). */
 	providerDefaultModels?: Record<string, string>;
+	/** Live model catalog for the selected terminal agent (copilot/codex). */
+	agentModels?: RuntimeAgentModelInfo[];
+	isLoadingAgentModels?: boolean;
 }): ReactElement {
 	const clineProviderId = clineSettings?.providerId;
 	const clineModelId = clineSettings?.modelId;
 	const clineReasoningEffort = clineSettings?.reasoningEffort;
-	const copilotModelId = agentSettings?.modelId ?? "";
-	const copilotReasoningEffort = agentSettings?.reasoningEffort ?? "none";
+	const agentModelId = agentSettings?.modelId ?? "";
+	const agentReasoningEffort = agentSettings?.reasoningEffort ?? "";
 
 	const updateTaskClineSettings = useCallback(
 		(updater: (current: RuntimeTaskClineSettings | undefined) => RuntimeTaskClineSettings | undefined) => {
@@ -312,7 +354,24 @@ export function TaskAgentModelPicker({
 	// (either explicitly overridden to cline, or defaulting to cline)
 	const effectiveAgentId = agentId ?? defaultAgentId ?? null;
 	const showClineProviderPicker = effectiveAgentId === "cline";
-	const showCopilotSettings = effectiveAgentId === "copilot";
+	const showAgentModelSettings =
+		effectiveAgentId !== null && isTerminalAgentWithModelCatalog(effectiveAgentId);
+
+	// The model the user has effectively chosen for the terminal agent (explicit
+	// override, else the agent's reported default model if any).
+	const selectedAgentModel = useMemo(
+		() => agentModels.find((model) => model.id === agentModelId) ?? null,
+		[agentModels, agentModelId],
+	);
+	// Reasoning efforts come from the selected model's own metadata, so they are
+	// never hardcoded and differ correctly per model and per agent.
+	const agentReasoningEffortOptions = useMemo(
+		() => selectedAgentModel?.reasoningEfforts ?? [],
+		[selectedAgentModel],
+	);
+	const selectedAgentModelSupportsReasoning = Boolean(
+		selectedAgentModel?.supportsReasoning && agentReasoningEffortOptions.length > 0,
+	);
 
 	// Show the Cline model picker when a provider is effectively selected
 	// (either explicitly overridden, or the global default provider is set)
@@ -323,8 +382,8 @@ export function TaskAgentModelPicker({
 	const [isSettingsExpanded, setIsSettingsExpanded] = useState(false);
 	const [isProviderPopoverOpen, setIsProviderPopoverOpen] = useState(false);
 	const [isModelPopoverOpen, setIsModelPopoverOpen] = useState(false);
-	const copilotModelInputId = useId();
-	const copilotReasoningSelectId = useId();
+	const agentModelSelectId = useId();
+	const agentReasoningSelectId = useId();
 	const [reasoningEffort, setReasoningEffort] = useState<RuntimeClineReasoningEffort | "">(
 		hasTaskClineSettingsOverride ? selectedTaskReasoningEffort : (defaultReasoningEffort ?? ""),
 	);
@@ -351,6 +410,62 @@ export function TaskAgentModelPicker({
 		},
 		[defaultReasoningEffort, updateTaskClineSettings],
 	);
+
+	const setAgentModelOverride = useCallback(
+		(nextModelId: string) => {
+			updateTaskAgentSettings((currentSettings) => {
+				const nextSettings = cloneTaskAgentSettings(currentSettings) ?? {};
+				const trimmedModelId = nextModelId.trim();
+				if (trimmedModelId) {
+					nextSettings.modelId = trimmedModelId;
+				} else {
+					delete nextSettings.modelId;
+				}
+				// Switching model invalidates a reasoning effort the new model may
+				// not support; drop it and let the user re-pick from the new list.
+				delete nextSettings.reasoningEffort;
+				return nextSettings.modelId ? nextSettings : undefined;
+			});
+		},
+		[updateTaskAgentSettings],
+	);
+
+	const setAgentReasoningEffortOverride = useCallback(
+		(nextReasoningEffort: string) => {
+			updateTaskAgentSettings((currentSettings) => {
+				const nextSettings = cloneTaskAgentSettings(currentSettings) ?? {};
+				if (nextReasoningEffort) {
+					nextSettings.reasoningEffort = nextReasoningEffort;
+				} else {
+					delete nextSettings.reasoningEffort;
+				}
+				return nextSettings.modelId || nextSettings.reasoningEffort ? nextSettings : undefined;
+			});
+		},
+		[updateTaskAgentSettings],
+	);
+
+	// Drop a stored reasoning effort once we know the selected model doesn't
+	// support reasoning (or no longer offers the chosen level).
+	useEffect(() => {
+		if (!showAgentModelSettings || !agentReasoningEffort) {
+			return;
+		}
+		if (agentModels.length === 0) {
+			return;
+		}
+		const stillValid = selectedAgentModelSupportsReasoning && agentReasoningEffortOptions.includes(agentReasoningEffort);
+		if (!stillValid) {
+			setAgentReasoningEffortOverride("");
+		}
+	}, [
+		showAgentModelSettings,
+		agentReasoningEffort,
+		agentModels.length,
+		selectedAgentModelSupportsReasoning,
+		agentReasoningEffortOptions,
+		setAgentReasoningEffortOverride,
+	]);
 
 	const modelPickerOptions = useMemo(() => {
 		const defaultOption = clineModelOptions.find((option) => option.value === "");
@@ -516,7 +631,10 @@ export function TaskAgentModelPicker({
 										onClineSettingsChange?.(undefined);
 										setReasoningEffort("");
 									}
-									if (nextEffectiveAgentId !== "copilot") {
+									// Model/reasoning overrides are agent-specific (a copilot model
+									// id is not valid for codex and vice-versa), so clear them
+									// whenever the effective agent actually changes.
+									if (nextEffectiveAgentId !== effectiveAgentId) {
 										onAgentSettingsChange?.(undefined);
 									}
 								}}
@@ -641,63 +759,63 @@ export function TaskAgentModelPicker({
 								) : null}
 							</div>
 						) : null}
-						{showCopilotSettings ? (
+						{showAgentModelSettings ? (
 							<div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
 								<div className="min-w-0">
-									<label className="text-[11px] text-text-secondary block mb-1" htmlFor={copilotModelInputId}>
+									<label className="text-[11px] text-text-secondary block mb-1" htmlFor={agentModelSelectId}>
 										Model
 									</label>
-									<input
-										id={copilotModelInputId}
-										type="text"
-										value={copilotModelId}
-										onChange={(event) => {
-											const nextModelId = event.currentTarget.value;
-											updateTaskAgentSettings((currentSettings) => {
-												const nextSettings = cloneTaskAgentSettings(currentSettings) ?? {};
-												const trimmedModelId = nextModelId.trim();
-												if (trimmedModelId) {
-													nextSettings.modelId = trimmedModelId;
-												} else {
-													delete nextSettings.modelId;
-												}
-												return nextSettings.modelId || nextSettings.reasoningEffort
-													? nextSettings
-													: undefined;
-											});
-										}}
-										placeholder="Default"
-										className="h-8 w-full rounded-md border border-border bg-surface-2 px-2.5 text-[13px] text-text-primary placeholder:text-text-tertiary focus:border-border-focus focus:outline-none"
-									/>
-								</div>
-								<div className="min-w-0">
-									<label
-										className="text-[11px] text-text-secondary block mb-1"
-										htmlFor={copilotReasoningSelectId}
-									>
-										Reasoning effort
-									</label>
 									<NativeSelect
-										id={copilotReasoningSelectId}
+										id={agentModelSelectId}
 										size="sm"
 										fill
-										value={copilotReasoningEffort}
+										value={agentModelId}
+										disabled={isLoadingAgentModels && agentModels.length === 0}
 										onChange={(event) => {
-											const nextReasoningEffort = event.currentTarget.value as RuntimeCopilotReasoningEffort;
-											updateTaskAgentSettings((currentSettings) => {
-												const nextSettings = cloneTaskAgentSettings(currentSettings) ?? {};
-												nextSettings.reasoningEffort = nextReasoningEffort;
-												return nextSettings;
-											});
+											setAgentModelOverride(event.currentTarget.value);
 										}}
 									>
-										{COPILOT_REASONING_EFFORT_OPTIONS.map((option) => (
-											<option key={option.value} value={option.value}>
-												{option.label}
+										<option value="">{isLoadingAgentModels ? "Loading…" : "Default"}</option>
+										{agentModels.map((model) => (
+											<option key={model.id} value={model.id}>
+												{model.label}
 											</option>
 										))}
+										{agentModelId && !agentModels.some((model) => model.id === agentModelId) ? (
+											<option value={agentModelId}>{agentModelId}</option>
+										) : null}
 									</NativeSelect>
 								</div>
+								{selectedAgentModelSupportsReasoning ? (
+									<div className="min-w-0">
+										<label
+											className="text-[11px] text-text-secondary block mb-1"
+											htmlFor={agentReasoningSelectId}
+										>
+											Reasoning effort
+										</label>
+										<NativeSelect
+											id={agentReasoningSelectId}
+											size="sm"
+											fill
+											value={agentReasoningEffort}
+											onChange={(event) => {
+												setAgentReasoningEffortOverride(event.currentTarget.value);
+											}}
+										>
+											<option value="">
+												{selectedAgentModel?.defaultReasoningEffort
+													? `Default (${selectedAgentModel.defaultReasoningEffort})`
+													: "Default"}
+											</option>
+											{agentReasoningEffortOptions.map((effort) => (
+												<option key={effort} value={effort}>
+													{effort}
+												</option>
+											))}
+										</NativeSelect>
+									</div>
+								) : null}
 							</div>
 						) : null}
 					</div>

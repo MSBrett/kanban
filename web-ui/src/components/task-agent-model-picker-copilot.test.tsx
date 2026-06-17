@@ -16,7 +16,25 @@ vi.mock("@runtime-agent-catalog", () => ({
 vi.mock("@/runtime/runtime-config-query", () => ({
 	fetchClineProviderCatalog: vi.fn(async () => []),
 	fetchClineProviderModels: vi.fn(async () => []),
+	fetchAgentModels: vi.fn(async () => []),
 }));
+
+const COPILOT_MODELS = [
+	{
+		id: "claude-sonnet-4.5",
+		label: "Claude Sonnet 4.5",
+		supportsReasoning: false,
+		reasoningEfforts: [] as string[],
+		defaultReasoningEffort: null,
+	},
+	{
+		id: "gpt-5.4",
+		label: "GPT-5.4",
+		supportsReasoning: true,
+		reasoningEfforts: ["low", "medium", "high", "xhigh"],
+		defaultReasoningEffort: "medium",
+	},
+];
 
 type CopilotTaskAgentModelPickerProps = ComponentProps<typeof TaskAgentModelPicker> & {
 	agentSettings?: RuntimeTaskAgentSettings;
@@ -59,7 +77,7 @@ describe("TaskAgentModelPicker – Copilot settings", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("renders Copilot model and reasoning controls without Cline provider controls", async () => {
+	it("renders Copilot model dropdown and per-model reasoning efforts from the live catalog", async () => {
 		const onAgentSettingsChange = vi.fn();
 
 		await act(async () => {
@@ -68,7 +86,7 @@ describe("TaskAgentModelPicker – Copilot settings", () => {
 					agentId={"copilot" as RuntimeAgentId}
 					onAgentIdChange={() => {}}
 					agentSettings={{
-						modelId: "gpt-5.2",
+						modelId: "gpt-5.4",
 						reasoningEffort: "xhigh",
 					}}
 					onAgentSettingsChange={onAgentSettingsChange}
@@ -85,6 +103,8 @@ describe("TaskAgentModelPicker – Copilot settings", () => {
 					isLoadingModels={false}
 					defaultAgentId={"codex" as RuntimeAgentId}
 					defaultProviderId={null}
+					agentModels={COPILOT_MODELS}
+					isLoadingAgentModels={false}
 				/>,
 			);
 		});
@@ -98,10 +118,54 @@ describe("TaskAgentModelPicker – Copilot settings", () => {
 		expect(container.textContent).toContain("Model");
 		expect(container.textContent).toContain("Reasoning effort");
 		expect(container.textContent).not.toContain("Provider");
-		for (const effort of ["none", "low", "medium", "high", "xhigh", "max"]) {
+		// The model's own efforts are shown — including xhigh, which the old
+		// hardcoded list happened to share — but NOT levels the model never
+		// declares (e.g. copilot's old hardcoded "none"/"max").
+		for (const effort of ["low", "medium", "high", "xhigh"]) {
 			expect(container.textContent).toContain(effort);
 		}
+		expect(container.textContent).not.toContain("max");
+		// Model dropdown is populated from the live catalog.
+		expect(container.textContent).toContain("Claude Sonnet 4.5");
+		expect(container.textContent).toContain("GPT-5.4");
 		expect(onAgentSettingsChange).not.toHaveBeenCalled();
+	});
+
+	it("hides reasoning effort for a model that does not support reasoning", async () => {
+		const onAgentSettingsChange = vi.fn();
+
+		await act(async () => {
+			root.render(
+				<CopilotTaskAgentModelPicker
+					agentId={"copilot" as RuntimeAgentId}
+					onAgentIdChange={() => {}}
+					agentSettings={{ modelId: "claude-sonnet-4.5" }}
+					onAgentSettingsChange={onAgentSettingsChange}
+					clineSettings={undefined}
+					onClineSettingsChange={() => {}}
+					agentOptions={[
+						{ value: "", label: "OpenAI Codex" },
+						{ value: "copilot", label: "GitHub Copilot" },
+					]}
+					clineProviderOptions={[]}
+					clineModelOptions={[]}
+					isLoadingProviders={false}
+					isLoadingModels={false}
+					defaultAgentId={"codex" as RuntimeAgentId}
+					defaultProviderId={null}
+					agentModels={COPILOT_MODELS}
+					isLoadingAgentModels={false}
+				/>,
+			);
+		});
+
+		const settingsTrigger = findButtonByText(container, "Override Agent Settings");
+		await act(async () => {
+			settingsTrigger?.click();
+		});
+
+		expect(container.textContent).toContain("Model");
+		expect(container.textContent).not.toContain("Reasoning effort");
 	});
 
 	it("clears Copilot settings when switching to a non-Copilot agent", async () => {
