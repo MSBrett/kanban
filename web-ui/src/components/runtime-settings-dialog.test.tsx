@@ -82,12 +82,13 @@ const clineSetupSectionOnSavedRef = vi.hoisted(() => ({
 vi.mock("@runtime-agent-catalog", () => ({
 	getRuntimeAgentCatalogEntry: vi.fn((agentId: string) => ({
 		id: agentId,
-		installUrl: null,
+		installUrl: agentId === "copilot" ? "https://docs.github.com/copilot/how-tos/copilot-cli" : null,
 		autonomousArgs: [],
 	})),
 	getRuntimeLaunchSupportedAgentCatalog: vi.fn(() => [
 		{ id: "cline", label: "Cline", binary: "cline" },
 		{ id: "claude", label: "Claude Code", binary: "claude" },
+		{ id: "copilot", label: "GitHub Copilot CLI", binary: "copilot" },
 	]),
 }));
 
@@ -387,5 +388,39 @@ describe("RuntimeSettingsDialog", () => {
 		});
 
 		expect(handleSaved).toHaveBeenCalledTimes(1);
+	});
+
+	it("lists GitHub Copilot CLI with a plain copilot command preview and install link", async () => {
+		const copilotConfig = {
+			...savedClineOauthConfig,
+			agents: [
+				...savedClineOauthConfig.agents,
+				{
+					id: "copilot",
+					label: "GitHub Copilot CLI",
+					binary: "copilot",
+					command: "copilot",
+					installed: false,
+				},
+			],
+		} as RuntimeConfigResponse;
+
+		await act(async () => {
+			root.render(
+				<RuntimeSettingsDialog
+					open={true}
+					workspaceId={"workspace-1"}
+					initialConfig={copilotConfig}
+					onOpenChange={() => {}}
+				/>,
+			);
+		});
+
+		expect(document.body.textContent).toContain("GitHub Copilot CLI");
+		expect(document.body.textContent).toContain("copilot");
+		const copilotInstallLink = Array.from(document.querySelectorAll("a")).find((link) =>
+			link.getAttribute("href")?.includes("docs.github.com/copilot"),
+		);
+		expect(copilotInstallLink).toBeInstanceOf(HTMLAnchorElement);
 	});
 });

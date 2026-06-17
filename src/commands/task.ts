@@ -8,6 +8,7 @@ import type {
 	RuntimeBoardColumnId,
 	RuntimeBoardDependency,
 	RuntimeClineReasoningEffort,
+	RuntimeTaskAgentSettings,
 	RuntimeTaskClineSettings,
 	RuntimeTaskProcessDefinition,
 	RuntimeTaskProcessState,
@@ -176,6 +177,26 @@ function cloneTaskClineSettings(settings?: RuntimeTaskClineSettings): RuntimeTas
 		...(providerId ? { providerId } : {}),
 		...(modelId ? { modelId } : {}),
 		...(settings.reasoningEffort ? { reasoningEffort: settings.reasoningEffort } : {}),
+	};
+}
+
+function cloneTaskAgentSettings(settings?: RuntimeTaskAgentSettings): RuntimeTaskAgentSettings | undefined {
+	if (settings === undefined) {
+		return undefined;
+	}
+	const modelId = settings.modelId?.trim();
+	return {
+		...(modelId ? { modelId } : {}),
+		...(settings.reasoningEffort ? { reasoningEffort: settings.reasoningEffort } : {}),
+	};
+}
+
+function formatTaskAgentSettings(settings?: RuntimeTaskAgentSettings): JsonRecord {
+	if (settings === undefined) {
+		return {};
+	}
+	return {
+		agentSettings: cloneTaskAgentSettings(settings) ?? {},
 	};
 }
 
@@ -450,6 +471,7 @@ function formatTaskRecord(
 		autoReviewEnabled: task.autoReviewEnabled === true,
 		autoReviewMode: task.autoReviewMode ?? "commit",
 		...(task.agentId ? { agentId: task.agentId } : {}),
+		...formatTaskAgentSettings(task.agentSettings),
 		...formatTaskClineSettings(task.clineSettings),
 		process: formatTaskProcessRecord(task.process),
 		createdAt: task.createdAt,
@@ -582,6 +604,7 @@ async function createTask(input: {
 	autoReviewEnabled?: boolean;
 	autoReviewMode?: "commit" | "pr";
 	agentId?: RuntimeAgentId;
+	agentSettings?: RuntimeTaskAgentSettings;
 	clineSettings?: RuntimeTaskClineSettings;
 	processId?: string;
 }): Promise<JsonRecord> {
@@ -604,6 +627,7 @@ async function createTask(input: {
 				autoReviewEnabled: input.autoReviewEnabled,
 				autoReviewMode: input.autoReviewMode,
 				agentId: input.agentId,
+				agentSettings: input.agentSettings,
 				clineSettings: input.clineSettings,
 				processId: input.processId,
 				baseRef: resolvedBaseRef,
@@ -629,6 +653,7 @@ async function createTask(input: {
 			autoReviewEnabled: created.autoReviewEnabled === true,
 			autoReviewMode: created.autoReviewMode ?? "commit",
 			...(created.agentId ? { agentId: created.agentId } : {}),
+			...formatTaskAgentSettings(created.agentSettings),
 			...formatTaskClineSettings(created.clineSettings),
 			process: formatTaskProcessRecord(created.process),
 		},
@@ -646,6 +671,7 @@ async function updateTaskCommand(input: {
 	autoReviewEnabled?: boolean;
 	autoReviewMode?: "commit" | "pr";
 	agentId?: RuntimeAgentId | null;
+	agentSettings?: RuntimeTaskAgentSettings | null;
 	clineProviderId?: string | null;
 	clineModelId?: string | null;
 	clineReasoningEffort?: ParsedTaskClineReasoningEffort;
@@ -659,6 +685,7 @@ async function updateTaskCommand(input: {
 		input.autoReviewEnabled === undefined &&
 		input.autoReviewMode === undefined &&
 		input.agentId === undefined &&
+		input.agentSettings === undefined &&
 		input.clineProviderId === undefined &&
 		input.clineModelId === undefined &&
 		input.clineReasoningEffort === undefined &&
@@ -697,6 +724,7 @@ async function updateTaskCommand(input: {
 			autoReviewEnabled: input.autoReviewEnabled ?? taskRecord.task.autoReviewEnabled === true,
 			autoReviewMode: input.autoReviewMode ?? taskRecord.task.autoReviewMode ?? "commit",
 			agentId: input.agentId,
+			agentSettings: input.agentSettings,
 			clineSettings: nextTaskClineSettings,
 			process: nextProcess,
 		});
@@ -1239,6 +1267,7 @@ interface TaskProcessStageLaunch {
 	process: RuntimeTaskProcessState;
 	stageId: string;
 	agentId?: RuntimeAgentId;
+	agentSettings?: RuntimeTaskAgentSettings;
 	clineSettings?: RuntimeTaskClineSettings;
 }
 
@@ -1291,6 +1320,7 @@ function buildTaskProcessStageLaunch(input: {
 		process: runningProcess,
 		stageId: stage.id,
 		...(agentId ? { agentId } : {}),
+		...(input.task.agentSettings ? { agentSettings: input.task.agentSettings } : {}),
 		...(input.task.clineSettings ? { clineSettings: input.task.clineSettings } : {}),
 	};
 }
@@ -1451,6 +1481,7 @@ async function updateTaskProcessCommand(input: {
 			baseRef: handoff.baseRef,
 			replaceActive: true,
 			agentId: handoff.agentId,
+			agentSettings: handoff.agentSettings,
 			clineSettings: handoff.clineSettings,
 		});
 		if (!started.ok || !started.summary) {
@@ -1619,6 +1650,7 @@ async function startTask(input: { cwd: string; taskId: string; projectPath?: str
 				prompt: processLaunch.prompt,
 				startInPlanMode: processLaunch.startInPlanMode,
 				agentId: processLaunch.agentId,
+				agentSettings: processLaunch.agentSettings,
 				clineSettings: processLaunch.clineSettings,
 				process: processLaunch.process,
 			}
@@ -1640,6 +1672,7 @@ async function startTask(input: { cwd: string; taskId: string; projectPath?: str
 			startInPlanMode: taskForSession.startInPlanMode,
 			baseRef: task.baseRef,
 			agentId: taskForSession.agentId,
+			agentSettings: taskForSession.agentSettings,
 			clineSettings: taskForSession.clineSettings,
 			replaceActive: Boolean(processLaunch),
 		});
@@ -2135,7 +2168,10 @@ export function registerTaskCommand(program: Command): void {
 		.option("--start-in-plan-mode [value]", "Set plan mode (true|false). Flag-only implies true.")
 		.option("--auto-review-enabled [value]", "Enable auto-review behavior (true|false). Flag-only implies true.")
 		.option("--auto-review-mode <mode>", "Auto-review mode: commit | pr.", parseAutoReviewMode)
-		.option("--agent-id <id>", "Agent override: cline | claude | codex | droid | gemini | opencode | default.")
+		.option(
+			"--agent-id <id>",
+			"Agent override: cline | claude | codex | copilot | droid | gemini | opencode | default.",
+		)
 		.option("--process <id>", "Assign a task process: sdd | tdd | gsd | lightweight | custom process id.")
 		.option(
 			"--cline-provider <id>",
@@ -2203,7 +2239,7 @@ export function registerTaskCommand(program: Command): void {
 		.option("--process <id>", 'Assign a task process by id. Use "none" to clear.')
 		.option(
 			"--agent-id <id>",
-			'Agent override: cline | claude | codex | droid | gemini | opencode. Use "default" to clear.',
+			'Agent override: cline | claude | codex | copilot | droid | gemini | opencode. Use "default" to clear.',
 		)
 		.option(
 			"--cline-provider <id>",

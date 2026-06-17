@@ -340,6 +340,8 @@ export default function App(): ReactElement {
 		setNewTaskBranchRef,
 		newTaskAgentId,
 		setNewTaskAgentId,
+		newTaskAgentSettings,
+		setNewTaskAgentSettings,
 		newTaskClineSettings,
 		setNewTaskClineSettings,
 		newTaskProcessId,
@@ -360,6 +362,8 @@ export default function App(): ReactElement {
 		setEditTaskBranchRef,
 		editTaskAgentId,
 		setEditTaskAgentId,
+		editTaskAgentSettings,
+		setEditTaskAgentSettings,
 		editTaskClineSettings,
 		setEditTaskClineSettings,
 		editTaskProcessId,
@@ -1119,6 +1123,8 @@ export default function App(): ReactElement {
 			onBranchRefChange={setEditTaskBranchRef}
 			agentId={editTaskAgentId}
 			onAgentIdChange={setEditTaskAgentId}
+			agentSettings={editTaskAgentSettings}
+			onAgentSettingsChange={setEditTaskAgentSettings}
 			clineSettings={editTaskClineSettings}
 			onClineSettingsChange={setEditTaskClineSettings}
 			processId={editTaskProcessId}
@@ -1503,6 +1509,8 @@ export default function App(): ReactElement {
 					onBranchRefChange={setNewTaskBranchRef}
 					agentId={newTaskAgentId}
 					onAgentIdChange={setNewTaskAgentId}
+					agentSettings={newTaskAgentSettings}
+					onAgentSettingsChange={setNewTaskAgentSettings}
 					clineSettings={newTaskClineSettings}
 					onClineSettingsChange={setNewTaskClineSettings}
 					processId={newTaskProcessId}

@@ -27,6 +27,7 @@ export interface RenderAppendSystemPromptOptions {
 const APPEND_PROMPT_AGENT_IDS: readonly RuntimeAgentId[] = [
 	"claude",
 	"codex",
+	"copilot",
 	"cline",
 	"droid",
 	"kiro",

@@ -71,7 +71,16 @@ export const runtimeSlashCommandsResponseSchema = z.object({
 });
 export type RuntimeSlashCommandsResponse = z.infer<typeof runtimeSlashCommandsResponseSchema>;
 
-export const runtimeAgentIdSchema = z.enum(["claude", "codex", "gemini", "opencode", "droid", "kiro", "cline"]);
+export const runtimeAgentIdSchema = z.enum([
+	"claude",
+	"codex",
+	"copilot",
+	"gemini",
+	"opencode",
+	"droid",
+	"kiro",
+	"cline",
+]);
 export type RuntimeAgentId = z.infer<typeof runtimeAgentIdSchema>;
 
 const runtimeBoardColumnIdEnum = z.enum(["backlog", "in_progress", "review", "trash"]);
@@ -96,6 +105,14 @@ export const runtimeTaskClineSettingsSchema = z.object({
 	reasoningEffort: runtimeClineReasoningEffortSchema.optional(),
 });
 export type RuntimeTaskClineSettings = z.infer<typeof runtimeTaskClineSettingsSchema>;
+
+export const runtimeCopilotReasoningEffortSchema = z.enum(["none", "low", "medium", "high", "xhigh", "max"]);
+export type RuntimeCopilotReasoningEffort = z.infer<typeof runtimeCopilotReasoningEffortSchema>;
+export const runtimeTaskAgentSettingsSchema = z.object({
+	modelId: z.string().optional(),
+	reasoningEffort: runtimeCopilotReasoningEffortSchema.optional(),
+});
+export type RuntimeTaskAgentSettings = z.infer<typeof runtimeTaskAgentSettingsSchema>;
 
 export const runtimeTaskProcessIdSchema = z
 	.string()
@@ -365,6 +382,7 @@ export const runtimeBoardCardSchema = z
 		autoReviewMode: runtimeTaskAutoReviewModeSchema.optional(),
 		images: z.array(runtimeTaskImageSchema).optional(),
 		agentId: runtimeAgentIdSchema.optional(),
+		agentSettings: runtimeTaskAgentSettingsSchema.optional(),
 		clineSettings: runtimeTaskClineSettingsSchema.optional(),
 		process: runtimeTaskProcessStateSchema.optional(),
 		clineProviderId: z.string().optional(),
@@ -1212,6 +1230,7 @@ export const runtimeTaskSessionStartRequestSchema = z.object({
 	cols: z.number().int().positive().optional(),
 	rows: z.number().int().positive().optional(),
 	agentId: runtimeAgentIdSchema.optional(),
+	agentSettings: runtimeTaskAgentSettingsSchema.optional(),
 	clineSettings: runtimeTaskClineSettingsSchema.optional(),
 });
 export type RuntimeTaskSessionStartRequest = z.infer<typeof runtimeTaskSessionStartRequestSchema>;

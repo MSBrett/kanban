@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 import type {
 	RuntimeAgentId,
 	RuntimeHookEvent,
+	RuntimeTaskAgentSettings,
 	RuntimeTaskImage,
 	RuntimeTaskSessionSummary,
 } from "../core/api-contract";
@@ -33,6 +34,7 @@ export interface AgentAdapterLaunchInput {
 	autonomousModeEnabled?: boolean;
 	cwd: string;
 	prompt: string;
+	agentSettings?: RuntimeTaskAgentSettings;
 	images?: RuntimeTaskImage[];
 	startInPlanMode?: boolean;
 	resumeFromTrash?: boolean;
@@ -802,6 +804,28 @@ const codexAdapter: AgentSessionAdapter = {
 	},
 };
 
+const copilotAdapter: AgentSessionAdapter = {
+	async prepare(input) {
+		const args = [...input.args];
+		const modelId = input.agentSettings?.modelId?.trim();
+		if (modelId && !hasCliOption(args, "--model")) {
+			args.push("--model", modelId);
+		}
+		const reasoningEffort = input.agentSettings?.reasoningEffort;
+		if (reasoningEffort && !hasCliOption(args, "--reasoning-effort") && !hasCliOption(args, "--effort")) {
+			args.push("--reasoning-effort", reasoningEffort);
+		}
+		if (input.startInPlanMode && !hasCliOption(args, "--plan")) {
+			args.push("--plan");
+		}
+		const withPromptLaunch = withPrompt(args, input.prompt, "flag", "-i");
+		return {
+			binary: input.binary,
+			...withPromptLaunch,
+		};
+	},
+};
+
 const geminiAdapter: AgentSessionAdapter = {
 	async prepare(input) {
 		const args = [...input.args];
@@ -1430,6 +1454,7 @@ const clineAdapter: AgentSessionAdapter = {
 const ADAPTERS: Record<RuntimeAgentId, AgentSessionAdapter> = {
 	claude: claudeAdapter,
 	codex: codexAdapter,
+	copilot: copilotAdapter,
 	gemini: geminiAdapter,
 	opencode: opencodeAdapter,
 	droid: droidAdapter,

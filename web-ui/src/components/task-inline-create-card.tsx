@@ -11,7 +11,12 @@ import { TaskProcessPanel } from "@/components/task-process-panel";
 import { TaskPromptComposer } from "@/components/task-prompt-composer";
 import { Button } from "@/components/ui/button";
 import { NativeSelect } from "@/components/ui/native-select";
-import type { RuntimeAgentId, RuntimeClineReasoningEffort, RuntimeTaskClineSettings } from "@/runtime/types";
+import type {
+	RuntimeAgentId,
+	RuntimeClineReasoningEffort,
+	RuntimeTaskAgentSettings,
+	RuntimeTaskClineSettings,
+} from "@/runtime/types";
 import type { BoardCard, TaskAutoReviewMode, TaskImage, TaskProcessDefinition, TaskProcessVerdict } from "@/types";
 import { pasteShortcutLabel } from "@/utils/platform";
 import { useDocumentEvent, useMeasure } from "@/utils/react-use";
@@ -71,6 +76,8 @@ export function TaskInlineCreateCard({
 	idPrefix = "inline-task",
 	agentId,
 	onAgentIdChange,
+	agentSettings,
+	onAgentSettingsChange,
 	clineSettings,
 	onClineSettingsChange,
 	processId,
@@ -110,6 +117,8 @@ export function TaskInlineCreateCard({
 	idPrefix?: string;
 	agentId?: RuntimeAgentId | undefined;
 	onAgentIdChange?: (value: RuntimeAgentId | undefined) => void;
+	agentSettings?: RuntimeTaskAgentSettings | undefined;
+	onAgentSettingsChange?: (value: RuntimeTaskAgentSettings | undefined) => void;
 	clineSettings?: RuntimeTaskClineSettings | undefined;
 	onClineSettingsChange?: (value: RuntimeTaskClineSettings | undefined) => void;
 	processId?: string | undefined;
@@ -358,6 +367,8 @@ export function TaskInlineCreateCard({
 					<TaskAgentModelPicker
 						agentId={agentId}
 						onAgentIdChange={onAgentIdChange}
+						agentSettings={agentSettings}
+						onAgentSettingsChange={onAgentSettingsChange}
 						clineSettings={clineSettings}
 						onClineSettingsChange={onClineSettingsChange}
 						agentOptions={agentOptions}

@@ -48,7 +48,7 @@ describe("agent-registry", () => {
 		const detected = detectInstalledCommands();
 
 		expect(detected).toEqual(["claude"]);
-		expect(commandDiscoveryMocks.isBinaryAvailableOnPath).toHaveBeenCalledTimes(8);
+		expect(commandDiscoveryMocks.isBinaryAvailableOnPath).toHaveBeenCalledTimes(9);
 	});
 
 	it("treats shell-only agents as unavailable", () => {
@@ -57,6 +57,20 @@ describe("agent-registry", () => {
 		const resolved = resolveAgentCommand(createRuntimeConfigState({ selectedAgentId: "claude" }));
 
 		expect(resolved).toBeNull();
+	});
+
+	it("resolves Copilot from the inherited PATH with direct process command parts", () => {
+		commandDiscoveryMocks.isBinaryAvailableOnPath.mockImplementation((binary: string) => binary === "copilot");
+
+		const resolved = resolveAgentCommand(createRuntimeConfigState({ selectedAgentId: "copilot" as never }));
+
+		expect(resolved).toEqual({
+			agentId: "copilot",
+			label: "GitHub Copilot CLI",
+			command: "copilot",
+			binary: "copilot",
+			args: [],
+		});
 	});
 
 	it("uses the current bundled Codex package shim when the native package layout is valid", () => {
@@ -129,9 +143,17 @@ describe("buildRuntimeConfigResponse", () => {
 		});
 
 		expect(response.agentAutonomousModeEnabled).toBe(true);
-		expect(response.agents.map((agent) => agent.id)).toEqual(["claude", "codex", "cline", "droid", "kiro"]);
+		expect(response.agents.map((agent) => agent.id)).toEqual([
+			"claude",
+			"codex",
+			"copilot",
+			"cline",
+			"droid",
+			"kiro",
+		]);
 		expect(response.agents.find((agent) => agent.id === "claude")?.defaultArgs).toEqual([]);
 		expect(response.agents.find((agent) => agent.id === "codex")?.defaultArgs).toEqual([]);
+		expect(response.agents.find((agent) => agent.id === "copilot")?.defaultArgs).toEqual([]);
 		expect(response.agents.find((agent) => agent.id === "cline")?.defaultArgs).toEqual([]);
 		expect(response.agents.find((agent) => agent.id === "droid")?.defaultArgs).toEqual([]);
 		expect(response.agents.find((agent) => agent.id === "kiro")?.defaultArgs).toEqual(["chat"]);
@@ -157,15 +179,24 @@ describe("buildRuntimeConfigResponse", () => {
 		});
 
 		expect(response.agentAutonomousModeEnabled).toBe(false);
-		expect(response.agents.map((agent) => agent.id)).toEqual(["claude", "codex", "cline", "droid", "kiro"]);
+		expect(response.agents.map((agent) => agent.id)).toEqual([
+			"claude",
+			"codex",
+			"copilot",
+			"cline",
+			"droid",
+			"kiro",
+		]);
 		expect(response.agents.find((agent) => agent.id === "claude")?.defaultArgs).toEqual([]);
 		expect(response.agents.find((agent) => agent.id === "codex")?.defaultArgs).toEqual([]);
+		expect(response.agents.find((agent) => agent.id === "copilot")?.defaultArgs).toEqual([]);
 		expect(response.agents.find((agent) => agent.id === "cline")?.defaultArgs).toEqual([]);
 		expect(response.agents.find((agent) => agent.id === "droid")?.defaultArgs).toEqual([]);
 		expect(response.agents.find((agent) => agent.id === "kiro")?.defaultArgs).toEqual(["chat"]);
 		expect(response.agents.find((agent) => agent.id === "cline")?.installed).toBe(true);
 		expect(response.agents.find((agent) => agent.id === "claude")?.command).toBe("claude");
 		expect(response.agents.find((agent) => agent.id === "codex")?.command).toBe("codex");
+		expect(response.agents.find((agent) => agent.id === "copilot")?.command).toBe("copilot");
 		expect(response.agents.find((agent) => agent.id === "droid")?.command).toBe("droid");
 		expect(response.agents.find((agent) => agent.id === "kiro")?.command).toBe("kiro-cli chat");
 	});

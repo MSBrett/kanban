@@ -4,6 +4,7 @@ import type {
 	RuntimeBoardColumnId,
 	RuntimeBoardData,
 	RuntimeBoardDependency,
+	RuntimeTaskAgentSettings,
 	RuntimeTaskAutoReviewMode,
 	RuntimeTaskClineSettings,
 	RuntimeTaskImage,
@@ -24,6 +25,7 @@ export interface RuntimeCreateTaskInput {
 	autoReviewMode?: RuntimeTaskAutoReviewMode;
 	images?: RuntimeTaskImage[];
 	agentId?: RuntimeAgentId;
+	agentSettings?: RuntimeTaskAgentSettings;
 	clineSettings?: RuntimeTaskClineSettings;
 	processId?: RuntimeTaskProcessId;
 	baseRef: string;
@@ -37,6 +39,7 @@ export interface RuntimeUpdateTaskInput {
 	autoReviewMode?: RuntimeTaskAutoReviewMode;
 	images?: RuntimeTaskImage[];
 	agentId?: RuntimeAgentId | null;
+	agentSettings?: RuntimeTaskAgentSettings | null;
 	clineSettings?: RuntimeTaskClineSettings | null;
 	process?: RuntimeTaskProcessState | null;
 	baseRef: string;
@@ -62,6 +65,17 @@ function cloneTaskClineSettings(settings?: RuntimeTaskClineSettings | null): Run
 	const modelId = settings.modelId?.trim();
 	return {
 		...(providerId ? { providerId } : {}),
+		...(modelId ? { modelId } : {}),
+		...(settings.reasoningEffort ? { reasoningEffort: settings.reasoningEffort } : {}),
+	};
+}
+
+function cloneTaskAgentSettings(settings?: RuntimeTaskAgentSettings | null): RuntimeTaskAgentSettings | undefined {
+	if (settings === undefined || settings === null) {
+		return undefined;
+	}
+	const modelId = settings.modelId?.trim();
+	return {
 		...(modelId ? { modelId } : {}),
 		...(settings.reasoningEffort ? { reasoningEffort: settings.reasoningEffort } : {}),
 	};
@@ -335,6 +349,7 @@ export function addTaskToColumn(
 		autoReviewMode: normalizeTaskAutoReviewMode(input.autoReviewMode),
 		images: cloneTaskImages(input.images),
 		...(input.agentId ? { agentId: input.agentId } : {}),
+		...(input.agentSettings !== undefined ? { agentSettings: cloneTaskAgentSettings(input.agentSettings) } : {}),
 		...(input.clineSettings !== undefined ? { clineSettings: cloneTaskClineSettings(input.clineSettings) } : {}),
 		...(input.processId
 			? { process: createTaskProcess(input.processId, now, resolveProcessDefinitions(board)) }
@@ -671,6 +686,21 @@ export function updateTask(
 				return card;
 			}
 			columnUpdated = true;
+			const nextAgentId = input.agentId === undefined ? card.agentId : (input.agentId ?? undefined);
+			const nextAgentSettings =
+				input.agentSettings === undefined
+					? cloneTaskAgentSettings(card.agentSettings)
+					: input.agentSettings === null
+						? undefined
+						: cloneTaskAgentSettings(input.agentSettings);
+			const nextClineSettings =
+				input.clineSettings === undefined
+					? cloneTaskClineSettings(card.clineSettings)
+					: input.clineSettings === null
+						? undefined
+						: cloneTaskClineSettings(input.clineSettings);
+			const nextProcess =
+				input.process === undefined ? cloneTaskProcess(card.process) : cloneTaskProcess(input.process);
 			updatedTask = {
 				...card,
 				title: resolveTaskTitle(input.title, prompt),
@@ -679,17 +709,25 @@ export function updateTask(
 				autoReviewEnabled: Boolean(input.autoReviewEnabled),
 				autoReviewMode: normalizeTaskAutoReviewMode(input.autoReviewMode),
 				images: input.images === undefined ? card.images : cloneTaskImages(input.images),
-				agentId: input.agentId === undefined ? card.agentId : (input.agentId ?? undefined),
-				clineSettings:
-					input.clineSettings === undefined
-						? cloneTaskClineSettings(card.clineSettings)
-						: input.clineSettings === null
-							? undefined
-							: cloneTaskClineSettings(input.clineSettings),
-				process: input.process === undefined ? cloneTaskProcess(card.process) : cloneTaskProcess(input.process),
+				...(nextAgentId ? { agentId: nextAgentId } : {}),
+				...(nextAgentSettings !== undefined ? { agentSettings: nextAgentSettings } : {}),
+				...(nextClineSettings !== undefined ? { clineSettings: nextClineSettings } : {}),
+				...(nextProcess !== undefined ? { process: nextProcess } : {}),
 				baseRef,
 				updatedAt: now,
 			};
+			if (!nextAgentId) {
+				delete updatedTask.agentId;
+			}
+			if (nextAgentSettings === undefined) {
+				delete updatedTask.agentSettings;
+			}
+			if (nextClineSettings === undefined) {
+				delete updatedTask.clineSettings;
+			}
+			if (nextProcess === undefined) {
+				delete updatedTask.process;
+			}
 			return updatedTask;
 		});
 		return columnUpdated ? { ...column, cards } : column;

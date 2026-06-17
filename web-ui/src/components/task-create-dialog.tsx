@@ -27,7 +27,12 @@ import { TaskPromptComposer } from "@/components/task-prompt-composer";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogBody, DialogFooter, DialogHeader } from "@/components/ui/dialog";
 import { NativeSelect } from "@/components/ui/native-select";
-import type { RuntimeAgentId, RuntimeClineReasoningEffort, RuntimeTaskClineSettings } from "@/runtime/types";
+import type {
+	RuntimeAgentId,
+	RuntimeClineReasoningEffort,
+	RuntimeTaskAgentSettings,
+	RuntimeTaskClineSettings,
+} from "@/runtime/types";
 import { LocalStorageKey } from "@/storage/local-storage-store";
 import type { TaskAutoReviewMode, TaskImage, TaskProcessDefinition } from "@/types";
 import { isMacPlatform, pasteShortcutLabel } from "@/utils/platform";
@@ -121,6 +126,8 @@ export function TaskCreateDialog({
 	onBranchRefChange,
 	agentId,
 	onAgentIdChange,
+	agentSettings,
+	onAgentSettingsChange,
 	clineSettings,
 	onClineSettingsChange,
 	processId,
@@ -155,6 +162,8 @@ export function TaskCreateDialog({
 	onBranchRefChange: (value: string) => void;
 	agentId?: RuntimeAgentId | undefined;
 	onAgentIdChange?: (value: RuntimeAgentId | undefined) => void;
+	agentSettings?: RuntimeTaskAgentSettings | undefined;
+	onAgentSettingsChange?: (value: RuntimeTaskAgentSettings | undefined) => void;
 	clineSettings?: RuntimeTaskClineSettings | undefined;
 	onClineSettingsChange?: (value: RuntimeTaskClineSettings | undefined) => void;
 	processId?: string | undefined;
@@ -607,6 +616,8 @@ export function TaskCreateDialog({
 						<TaskAgentModelPicker
 							agentId={agentId}
 							onAgentIdChange={onAgentIdChange}
+							agentSettings={agentSettings}
+							onAgentSettingsChange={onAgentSettingsChange}
 							clineSettings={clineSettings}
 							onClineSettingsChange={onClineSettingsChange}
 							agentOptions={agentOptions}

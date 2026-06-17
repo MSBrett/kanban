@@ -4,7 +4,12 @@ import { createTaskProcess } from "@runtime-task-process";
 import * as runtimeTaskState from "@runtime-task-state";
 
 import { createInitialBoardData } from "@/data/board-data";
-import type { RuntimeAgentId, RuntimeClineReasoningEffort, RuntimeTaskClineSettings } from "@/runtime/types";
+import type {
+	RuntimeAgentId,
+	RuntimeClineReasoningEffort,
+	RuntimeTaskAgentSettings,
+	RuntimeTaskClineSettings,
+} from "@/runtime/types";
 import { isAllowedCrossColumnCardMove, type ProgrammaticCardMoveInFlight } from "@/state/drag-rules";
 import {
 	type BoardCard,
@@ -28,6 +33,7 @@ export interface TaskDraft {
 	autoReviewMode?: TaskAutoReviewMode;
 	images?: TaskImage[];
 	agentId?: RuntimeAgentId;
+	agentSettings?: RuntimeTaskAgentSettings;
 	clineSettings?: RuntimeTaskClineSettings;
 	processId?: string;
 	process?: TaskProcessState | null;
@@ -147,6 +153,26 @@ function normalizeTaskClineSettings(input: {
 	};
 }
 
+const COPILOT_REASONING_EFFORTS = new Set(["none", "low", "medium", "high", "xhigh", "max"]);
+
+function normalizeTaskAgentSettings(rawSettings: unknown): RuntimeTaskAgentSettings | undefined {
+	if (!rawSettings || typeof rawSettings !== "object" || Array.isArray(rawSettings)) {
+		return undefined;
+	}
+	const settings = rawSettings as Record<string, unknown>;
+	const modelId = typeof settings.modelId === "string" ? settings.modelId.trim() : "";
+	const reasoningEffort = typeof settings.reasoningEffort === "string" ? settings.reasoningEffort : "";
+	if (!modelId && !COPILOT_REASONING_EFFORTS.has(reasoningEffort)) {
+		return {};
+	}
+	return {
+		...(modelId ? { modelId } : {}),
+		...(COPILOT_REASONING_EFFORTS.has(reasoningEffort)
+			? { reasoningEffort: reasoningEffort as RuntimeTaskAgentSettings["reasoningEffort"] }
+			: {}),
+	};
+}
+
 function normalizeCard(rawCard: unknown): BoardCard | null {
 	if (!rawCard || typeof rawCard !== "object") {
 		return null;
@@ -162,6 +188,7 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 		images?: unknown;
 		baseRef?: unknown;
 		agentId?: unknown;
+		agentSettings?: unknown;
 		clineSettings?: unknown;
 		process?: unknown;
 		clineProviderId?: unknown;
@@ -188,6 +215,7 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 		legacyModelId: card.clineModelId,
 		legacyReasoningEffort: card.clineReasoningEffort,
 	});
+	const agentSettings = normalizeTaskAgentSettings(card.agentSettings);
 
 	const now = Date.now();
 
@@ -203,6 +231,7 @@ function normalizeCard(rawCard: unknown): BoardCard | null {
 		images: normalizeTaskImages(card.images),
 		baseRef,
 		...(typeof card.agentId === "string" && card.agentId ? { agentId: card.agentId as RuntimeAgentId } : {}),
+		...(agentSettings !== undefined ? { agentSettings } : {}),
 		...(clineSettings !== undefined ? { clineSettings } : {}),
 		...(card.process && typeof card.process === "object" ? { process: card.process as TaskProcessState } : {}),
 		createdAt: typeof card.createdAt === "number" ? card.createdAt : now,
@@ -358,6 +387,7 @@ export function addTaskToColumnWithResult(
 			autoReviewMode: draft.autoReviewMode,
 			images: draft.images,
 			agentId: draft.agentId,
+			agentSettings: draft.agentSettings,
 			clineSettings: draft.clineSettings,
 			processId: draft.processId,
 			baseRef: draft.baseRef,
@@ -576,6 +606,7 @@ export function updateTask(board: BoardData, taskId: string, draft: TaskDraft): 
 							? draft.images.map((image) => ({ ...image }))
 							: undefined,
 				agentId: draft.agentId,
+				agentSettings: draft.agentSettings,
 				clineSettings: draft.clineSettings,
 				...(nextProcess ? { process: nextProcess } : {}),
 				baseRef,
@@ -608,6 +639,7 @@ export function updateTaskTitle(
 		autoReviewMode: selection.card.autoReviewMode,
 		images: selection.card.images,
 		agentId: selection.card.agentId,
+		agentSettings: selection.card.agentSettings,
 		clineSettings: selection.card.clineSettings,
 		process: selection.card.process,
 		baseRef: selection.card.baseRef,
@@ -699,6 +731,7 @@ export function disableTaskAutoReview(board: BoardData, taskId: string): { board
 		autoReviewMode: DEFAULT_TASK_AUTO_REVIEW_MODE,
 		images: selection.card.images,
 		agentId: selection.card.agentId,
+		agentSettings: selection.card.agentSettings,
 		clineSettings: selection.card.clineSettings,
 		process: selection.card.process,
 		baseRef: selection.card.baseRef,

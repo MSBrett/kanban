@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
-
+import { runtimeAgentIdSchema, runtimeBoardDataSchema } from "../../src/core/api-contract";
 import {
 	parseHookIngestRequest,
 	parseTaskSessionStartRequest,
 	parseWorkspaceFileSearchRequest,
 } from "../../src/core/api-validation";
+
+const COPILOT_REASONING_EFFORTS = ["none", "low", "medium", "high", "xhigh", "max"] as const;
 
 describe("parseWorkspaceFileSearchRequest", () => {
 	it("parses q and limit", () => {
@@ -87,5 +89,106 @@ describe("parseTaskSessionStartRequest", () => {
 			baseRef: "main",
 			resumeFromTrash: true,
 		});
+	});
+
+	it("accepts copilot as a runtime agent id", () => {
+		expect(runtimeAgentIdSchema.safeParse("copilot").success).toBe(true);
+	});
+
+	it("parses Copilot model and reasoning settings through startTaskSession", () => {
+		const parsed = parseTaskSessionStartRequest({
+			taskId: "  task-1  ",
+			prompt: "Implement the Copilot adapter",
+			baseRef: "  main  ",
+			agentId: "copilot",
+			agentSettings: {
+				modelId: "gpt-5.2",
+				reasoningEffort: "max",
+			},
+		});
+
+		expect(parsed).toEqual({
+			taskId: "task-1",
+			prompt: "Implement the Copilot adapter",
+			baseRef: "main",
+			agentId: "copilot",
+			agentSettings: {
+				modelId: "gpt-5.2",
+				reasoningEffort: "max",
+			},
+		});
+	});
+
+	it("accepts the Copilot CLI reasoning effort levels from local copilot --help", () => {
+		for (const reasoningEffort of COPILOT_REASONING_EFFORTS) {
+			expect(() =>
+				parseTaskSessionStartRequest({
+					taskId: "task-1",
+					prompt: "Implement the Copilot adapter",
+					baseRef: "main",
+					agentId: "copilot",
+					agentSettings: {
+						modelId: "gpt-5.2",
+						reasoningEffort,
+					},
+				}),
+			).not.toThrow();
+		}
+	});
+
+	it("rejects unsupported Copilot reasoning effort levels", () => {
+		expect(() =>
+			parseTaskSessionStartRequest({
+				taskId: "task-1",
+				prompt: "Implement the Copilot adapter",
+				baseRef: "main",
+				agentId: "copilot",
+				agentSettings: {
+					modelId: "gpt-5.2",
+					reasoningEffort: "ultra",
+				},
+			}),
+		).toThrow();
+	});
+
+	it("preserves generic task agent settings through board state normalization", () => {
+		const parsed = runtimeBoardDataSchema.parse({
+			columns: [
+				{
+					id: "backlog",
+					title: "Backlog",
+					cards: [
+						{
+							id: "task-1",
+							title: "Copilot task",
+							prompt: "Implement the Copilot adapter",
+							startInPlanMode: false,
+							agentId: "copilot",
+							agentSettings: {
+								modelId: "gpt-5.2",
+								reasoningEffort: "xhigh",
+							},
+							baseRef: "main",
+							createdAt: 1,
+							updatedAt: 1,
+						},
+					],
+				},
+				{ id: "in_progress", title: "In Progress", cards: [] },
+				{ id: "review", title: "Review", cards: [] },
+				{ id: "trash", title: "Done", cards: [] },
+			],
+			dependencies: [],
+		});
+
+		expect(parsed.columns[0]?.cards[0]).toEqual(
+			expect.objectContaining({
+				agentId: "copilot",
+				agentSettings: {
+					modelId: "gpt-5.2",
+					reasoningEffort: "xhigh",
+				},
+			}),
+		);
 	});
 });

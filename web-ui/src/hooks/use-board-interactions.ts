@@ -1167,6 +1167,7 @@ export function useBoardInteractions({
 					autoReviewMode: resolveTaskAutoReviewMode(selection.card.autoReviewMode),
 					images: selection.card.images,
 					agentId: selection.card.agentId,
+					agentSettings: selection.card.agentSettings,
 					clineSettings: selection.card.clineSettings,
 					baseRef: selection.card.baseRef,
 				});

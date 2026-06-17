@@ -10,6 +10,12 @@ import {
 	updateTask,
 } from "../../src/core/task-board-mutations";
 
+type CopilotReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh" | "max";
+type RuntimeTaskAgentSettings = {
+	modelId?: string;
+	reasoningEffort?: CopilotReasoningEffort;
+};
+
 function createBoard(): RuntimeBoardData {
 	return {
 		columns: [
@@ -161,6 +167,30 @@ describe("per-task agent/model/provider overrides", () => {
 		});
 	});
 
+	it("persists generic task agent settings on a Copilot task when creating a task", () => {
+		const input = {
+			prompt: "Copilot task",
+			baseRef: "main",
+			agentId: "copilot" as never,
+			agentSettings: {
+				modelId: "gpt-5.2",
+				reasoningEffort: "max",
+			},
+		} satisfies Parameters<typeof addTaskToColumn>[2] & { agentSettings: RuntimeTaskAgentSettings };
+
+		const created = addTaskToColumn(createBoard(), "backlog", input, () => "aaaaa111");
+
+		expect(created.task).toEqual(
+			expect.objectContaining({
+				agentId: "copilot",
+				agentSettings: {
+					modelId: "gpt-5.2",
+					reasoningEffort: "max",
+				},
+			}),
+		);
+	});
+
 	it("leaves override fields undefined when not provided", () => {
 		const created = addTaskToColumn(
 			createBoard(),
@@ -261,6 +291,61 @@ describe("per-task agent/model/provider overrides", () => {
 
 		expect(updated.task?.agentId).toBeUndefined();
 		expect(updated.task?.clineSettings).toBeUndefined();
+	});
+
+	it("clears generic task agent settings only when update input provides null", () => {
+		const board = {
+			columns: [
+				{
+					id: "backlog",
+					title: "Backlog",
+					cards: [
+						{
+							id: "aaaaa111",
+							title: "Copilot task",
+							prompt: "Copilot task",
+							startInPlanMode: false,
+							agentId: "copilot",
+							agentSettings: {
+								modelId: "gpt-5.2",
+								reasoningEffort: "xhigh",
+							},
+							baseRef: "main",
+							createdAt: 1,
+							updatedAt: 1,
+						},
+					],
+				},
+				{ id: "in_progress", title: "In Progress", cards: [] },
+				{ id: "review", title: "Review", cards: [] },
+				{ id: "trash", title: "Done", cards: [] },
+			],
+			dependencies: [],
+		} as RuntimeBoardData;
+
+		const preserved = updateTask(board, "aaaaa111", {
+			prompt: "Updated Copilot task",
+			baseRef: "main",
+		});
+
+		expect(preserved.task).toEqual(
+			expect.objectContaining({
+				agentSettings: {
+					modelId: "gpt-5.2",
+					reasoningEffort: "xhigh",
+				},
+			}),
+		);
+
+		const clearInput = {
+			prompt: "Updated Copilot task",
+			baseRef: "main",
+			agentSettings: null,
+		} satisfies Parameters<typeof updateTask>[2] & { agentSettings: null };
+		const cleared = updateTask(preserved.board, "aaaaa111", clearInput);
+
+		expect(cleared.task).not.toHaveProperty("agentSettings");
+		expect(cleared.task?.clineSettings).toBeUndefined();
 	});
 
 	it("preserves overrides across move operations", () => {

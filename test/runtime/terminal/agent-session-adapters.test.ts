@@ -6,6 +6,15 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { prepareAgentLaunch } from "../../../src/terminal/agent-session-adapters";
 
+type CopilotReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh" | "max";
+type RuntimeTaskAgentSettings = {
+	modelId?: string;
+	reasoningEffort?: CopilotReasoningEffort;
+};
+type AgentAdapterLaunchInputWithAgentSettings = Parameters<typeof prepareAgentLaunch>[0] & {
+	agentSettings?: RuntimeTaskAgentSettings;
+};
+
 const originalHome = process.env.HOME;
 const originalAppData = process.env.APPDATA;
 const originalLocalAppData = process.env.LOCALAPPDATA;
@@ -50,6 +59,10 @@ function getCodexConfigOverrideValues(args: string[], key: string): string[] {
 		}
 	}
 	return values;
+}
+
+function countCliOption(args: string[], optionName: string): number {
+	return args.filter((arg) => arg === optionName || arg.startsWith(`${optionName}=`)).length;
 }
 
 afterEach(() => {
@@ -752,5 +765,30 @@ describe("prepareAgentLaunch hook strategies", () => {
 			prompt: "",
 		});
 		expect(kiroLaunch.args).toContain("--trust-all-tools");
+	});
+
+	it("adds Copilot model and reasoning args from task agent settings without duplicates", async () => {
+		setupTempHome();
+		const input = {
+			taskId: "task-copilot",
+			agentId: "copilot" as never,
+			binary: "copilot",
+			args: ["--model", "gpt-5.2", "--reasoning-effort", "max"],
+			cwd: "/tmp",
+			prompt: "Implement Copilot launch settings",
+			agentSettings: {
+				modelId: "gpt-5.2",
+				reasoningEffort: "max",
+			},
+		} satisfies AgentAdapterLaunchInputWithAgentSettings;
+
+		const launch = await prepareAgentLaunch(input);
+
+		expect(launch.binary).toBe("copilot");
+		expect(launch.args).toEqual(expect.arrayContaining(["--model", "gpt-5.2", "--reasoning-effort", "max"]));
+		expect(countCliOption(launch.args, "--model")).toBe(1);
+		expect(countCliOption(launch.args, "--reasoning-effort")).toBe(1);
+		expect(launch.args).not.toEqual(expect.arrayContaining(["bash", "-lc"]));
+		expect(launch.args).not.toEqual(expect.arrayContaining(["zsh", "-lc"]));
 	});
 });

@@ -27,6 +27,14 @@ export const RUNTIME_AGENT_CATALOG: RuntimeAgentCatalogEntry[] = [
 		installUrl: "https://github.com/openai/codex",
 	},
 	{
+		id: "copilot",
+		label: "GitHub Copilot CLI",
+		binary: "copilot",
+		baseArgs: [],
+		autonomousArgs: [],
+		installUrl: "https://docs.github.com/copilot/how-tos/copilot-cli",
+	},
+	{
 		id: "cline",
 		label: "Cline",
 		binary: "cline",
@@ -74,6 +82,7 @@ export const RUNTIME_LAUNCH_SUPPORTED_AGENT_IDS: readonly RuntimeAgentId[] = [
 	"cline",
 	"claude",
 	"codex",
+	"copilot",
 	"droid",
 	"kiro",
 	// "opencode",

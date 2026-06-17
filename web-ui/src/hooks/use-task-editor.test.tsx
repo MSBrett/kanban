@@ -3,7 +3,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useTaskEditor } from "@/hooks/use-task-editor";
-import type { RuntimeAgentId, RuntimeTaskClineSettings } from "@/runtime/types";
+import type { RuntimeAgentId, RuntimeTaskAgentSettings, RuntimeTaskClineSettings } from "@/runtime/types";
 import type { BoardCard, BoardData, TaskAutoReviewMode, TaskImage } from "@/types";
 
 function createTask(taskId: string, prompt: string, createdAt: number, overrides: Partial<BoardCard> = {}): BoardCard {
@@ -41,9 +41,11 @@ interface HookSnapshot {
 	newTaskBranchRef: string;
 	newTaskAgentId: RuntimeAgentId | undefined;
 	newTaskClineSettings: RuntimeTaskClineSettings | undefined;
+	newTaskAgentSettings: RuntimeTaskAgentSettings | undefined;
 	editingTaskId: string | null;
 	editTaskPrompt: string;
 	editTaskStartInPlanMode: boolean;
+	editTaskAgentSettings: RuntimeTaskAgentSettings | undefined;
 	isEditTaskStartInPlanModeDisabled: boolean;
 	handleOpenCreateTask: () => void;
 	handleCreateTask: (options?: { keepDialogOpen?: boolean }) => string | null;
@@ -58,6 +60,8 @@ interface HookSnapshot {
 	setEditTaskAutoReviewMode: (value: TaskAutoReviewMode) => void;
 	setNewTaskAgentId: (value: RuntimeAgentId | undefined) => void;
 	setNewTaskClineSettings: (value: RuntimeTaskClineSettings | undefined) => void;
+	setNewTaskAgentSettings: (value: RuntimeTaskAgentSettings | undefined) => void;
+	setEditTaskAgentSettings: (value: RuntimeTaskAgentSettings | undefined) => void;
 }
 
 function requireSnapshot(snapshot: HookSnapshot | null): HookSnapshot {
@@ -88,6 +92,12 @@ function HookHarness({
 		setSelectedTaskId,
 		queueTaskStartAfterEdit,
 	});
+	const editorWithGenericAgentSettings = editor as typeof editor & {
+		newTaskAgentSettings?: RuntimeTaskAgentSettings;
+		setNewTaskAgentSettings?: (value: RuntimeTaskAgentSettings | undefined) => void;
+		editTaskAgentSettings?: RuntimeTaskAgentSettings;
+		setEditTaskAgentSettings?: (value: RuntimeTaskAgentSettings | undefined) => void;
+	};
 
 	useEffect(() => {
 		onSnapshot({
@@ -98,9 +108,11 @@ function HookHarness({
 			newTaskBranchRef: editor.newTaskBranchRef,
 			newTaskAgentId: editor.newTaskAgentId,
 			newTaskClineSettings: editor.newTaskClineSettings,
+			newTaskAgentSettings: editorWithGenericAgentSettings.newTaskAgentSettings,
 			editingTaskId: editor.editingTaskId,
 			editTaskPrompt: editor.editTaskPrompt,
 			editTaskStartInPlanMode: editor.editTaskStartInPlanMode,
+			editTaskAgentSettings: editorWithGenericAgentSettings.editTaskAgentSettings,
 			isEditTaskStartInPlanModeDisabled: editor.isEditTaskStartInPlanModeDisabled,
 			handleOpenCreateTask: editor.handleOpenCreateTask,
 			handleCreateTask: editor.handleCreateTask,
@@ -115,6 +127,16 @@ function HookHarness({
 			setEditTaskAutoReviewMode: editor.setEditTaskAutoReviewMode,
 			setNewTaskAgentId: editor.setNewTaskAgentId,
 			setNewTaskClineSettings: editor.setNewTaskClineSettings,
+			setNewTaskAgentSettings:
+				editorWithGenericAgentSettings.setNewTaskAgentSettings ??
+				(() => {
+					throw new Error("useTaskEditor must expose setNewTaskAgentSettings for generic agent settings.");
+				}),
+			setEditTaskAgentSettings:
+				editorWithGenericAgentSettings.setEditTaskAgentSettings ??
+				(() => {
+					throw new Error("useTaskEditor must expose setEditTaskAgentSettings for generic agent settings.");
+				}),
 		});
 	}, [
 		board,
@@ -134,6 +156,10 @@ function HookHarness({
 		editor.newTaskBranchRef,
 		editor.newTaskAgentId,
 		editor.newTaskClineSettings,
+		editorWithGenericAgentSettings.newTaskAgentSettings,
+		editorWithGenericAgentSettings.editTaskAgentSettings,
+		editorWithGenericAgentSettings.setNewTaskAgentSettings,
+		editorWithGenericAgentSettings.setEditTaskAgentSettings,
 		editor.setEditTaskAutoReviewEnabled,
 		editor.setEditTaskAutoReviewMode,
 		editor.setEditTaskPrompt,
@@ -427,6 +453,106 @@ describe("useTaskEditor", () => {
 
 		const createdCard = requireSnapshot(latestSnapshot).board.columns[0]?.cards[0];
 		expect(createdCard?.clineSettings).toEqual({
+			reasoningEffort: "low",
+		});
+	});
+
+	it("persists Copilot model and reasoning settings when creating a task", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={createBoard()}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleOpenCreateTask();
+		});
+
+		await act(async () => {
+			const snapshot = requireSnapshot(latestSnapshot);
+			snapshot.setNewTaskPrompt("Copilot task");
+			snapshot.setNewTaskAgentId("copilot");
+			snapshot.setNewTaskAgentSettings({
+				modelId: "gpt-5.2",
+				reasoningEffort: "max",
+			});
+		});
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleCreateTask();
+		});
+
+		const createdCard = requireSnapshot(latestSnapshot).board.columns[0]?.cards[0];
+		expect(createdCard?.agentId).toBe("copilot");
+		expect(createdCard?.agentSettings).toEqual({
+			modelId: "gpt-5.2",
+			reasoningEffort: "max",
+		});
+		expect(requireSnapshot(latestSnapshot).newTaskAgentSettings).toBeUndefined();
+	});
+
+	it("loads and saves Copilot settings while editing an existing task", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+		const initialBoard = createBoard([
+			createTask("task-1", "Initial prompt", 1, {
+				agentId: "copilot",
+				agentSettings: {
+					modelId: "gpt-5.2",
+					reasoningEffort: "xhigh",
+				},
+			}),
+		]);
+
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={initialBoard}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+
+		const task = requireSnapshot(latestSnapshot).board.columns[0]?.cards[0];
+		if (!task) {
+			throw new Error("Expected a backlog task.");
+		}
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleOpenEditTask(task);
+		});
+
+		expect(requireSnapshot(latestSnapshot).editTaskAgentSettings).toEqual({
+			modelId: "gpt-5.2",
+			reasoningEffort: "xhigh",
+		});
+
+		await act(async () => {
+			const snapshot = requireSnapshot(latestSnapshot);
+			snapshot.setEditTaskPrompt("Updated Copilot prompt");
+			snapshot.setEditTaskAgentSettings({
+				modelId: "gpt-5.2",
+				reasoningEffort: "low",
+			});
+		});
+
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleSaveEditedTask();
+		});
+
+		const savedCard = requireSnapshot(latestSnapshot).board.columns[0]?.cards[0];
+		expect(savedCard?.prompt).toBe("Updated Copilot prompt");
+		expect(savedCard?.agentId).toBe("copilot");
+		expect(savedCard?.agentSettings).toEqual({
+			modelId: "gpt-5.2",
 			reasoningEffort: "low",
 		});
 	});

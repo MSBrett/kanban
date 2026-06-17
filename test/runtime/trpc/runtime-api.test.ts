@@ -176,6 +176,12 @@ function createSummary(overrides: Partial<RuntimeTaskSessionSummary> = {}): Runt
 	};
 }
 
+type CopilotReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh" | "max";
+type RuntimeTaskAgentSettings = {
+	modelId?: string;
+	reasoningEffort?: CopilotReasoningEffort;
+};
+
 function createRuntimeConfigState(): RuntimeConfigState {
 	return {
 		selectedAgentId: "claude",
@@ -1173,6 +1179,65 @@ describe("createRuntimeApi startTaskSession", () => {
 			expect.objectContaining({
 				agentId: "codex",
 				images,
+			}),
+		);
+		expect(clineTaskSessionService.startTaskSession).not.toHaveBeenCalled();
+	});
+
+	it("forwards Copilot task agent settings to CLI task sessions", async () => {
+		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
+		agentRegistryMocks.resolveAgentCommand.mockReturnValue({
+			agentId: "copilot" as never,
+			label: "GitHub Copilot",
+			command: "copilot",
+			binary: "copilot",
+			args: [],
+		});
+
+		const terminalManager = {
+			startTaskSession: vi.fn(async () => createSummary({ agentId: "copilot" as never })),
+			applyTurnCheckpoint: vi.fn(),
+		};
+		const clineTaskSessionService = createClineTaskSessionServiceMock();
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => {
+				const runtimeConfigState = createRuntimeConfigState();
+				runtimeConfigState.selectedAgentId = "codex";
+				return runtimeConfigState;
+			}),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+
+		const agentSettings: RuntimeTaskAgentSettings = {
+			modelId: "gpt-5.2",
+			reasoningEffort: "xhigh",
+		};
+		const startInput = {
+			taskId: "task-1",
+			baseRef: "main",
+			prompt: "Continue task",
+			agentId: "copilot" as never,
+			agentSettings,
+		} satisfies Parameters<typeof api.startTaskSession>[1] & { agentSettings: RuntimeTaskAgentSettings };
+		const response = await api.startTaskSession(
+			{
+				workspaceId: "workspace-1",
+				workspacePath: "/tmp/repo",
+			},
+			startInput,
+		);
+
+		expect(response.ok).toBe(true);
+		expect(terminalManager.startTaskSession).toHaveBeenCalledWith(
+			expect.objectContaining({
+				agentId: "copilot",
+				binary: "copilot",
+				agentSettings,
 			}),
 		);
 		expect(clineTaskSessionService.startTaskSession).not.toHaveBeenCalled();

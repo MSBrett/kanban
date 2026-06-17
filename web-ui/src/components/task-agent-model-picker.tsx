@@ -2,7 +2,7 @@ import * as Collapsible from "@radix-ui/react-collapsible";
 import { getRuntimeLaunchSupportedAgentCatalog } from "@runtime-agent-catalog";
 import { ChevronDown } from "lucide-react";
 import type { ReactElement } from "react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useState } from "react";
 
 import { ClineChatModelSelector } from "@/components/detail-panels/cline-chat-model-selector";
 import {
@@ -19,6 +19,8 @@ import type {
 	RuntimeClineProviderCatalogItem,
 	RuntimeClineProviderModel,
 	RuntimeClineReasoningEffort,
+	RuntimeCopilotReasoningEffort,
+	RuntimeTaskAgentSettings,
 	RuntimeTaskClineSettings,
 } from "@/runtime/types";
 
@@ -220,6 +222,26 @@ function cloneTaskClineSettings(settings?: RuntimeTaskClineSettings): RuntimeTas
 	};
 }
 
+function cloneTaskAgentSettings(settings?: RuntimeTaskAgentSettings): RuntimeTaskAgentSettings | undefined {
+	if (settings === undefined) {
+		return undefined;
+	}
+	const modelId = settings.modelId?.trim();
+	return {
+		...(modelId ? { modelId } : {}),
+		...(settings.reasoningEffort ? { reasoningEffort: settings.reasoningEffort } : {}),
+	};
+}
+
+const COPILOT_REASONING_EFFORT_OPTIONS: Array<{ value: RuntimeCopilotReasoningEffort; label: string }> = [
+	{ value: "none", label: "none" },
+	{ value: "low", label: "low" },
+	{ value: "medium", label: "medium" },
+	{ value: "high", label: "high" },
+	{ value: "xhigh", label: "xhigh" },
+	{ value: "max", label: "max" },
+];
+
 // ---------------------------------------------------------------------------
 // Component: renders Agent, Cline provider, and Cline model pickers
 // ---------------------------------------------------------------------------
@@ -227,6 +249,8 @@ function cloneTaskClineSettings(settings?: RuntimeTaskClineSettings): RuntimeTas
 export function TaskAgentModelPicker({
 	agentId,
 	onAgentIdChange,
+	agentSettings,
+	onAgentSettingsChange,
 	clineSettings,
 	onClineSettingsChange,
 	agentOptions,
@@ -244,6 +268,8 @@ export function TaskAgentModelPicker({
 }: {
 	agentId: RuntimeAgentId | undefined;
 	onAgentIdChange: (value: RuntimeAgentId | undefined) => void;
+	agentSettings?: RuntimeTaskAgentSettings | undefined;
+	onAgentSettingsChange?: (value: RuntimeTaskAgentSettings | undefined) => void;
 	clineSettings?: RuntimeTaskClineSettings | undefined;
 	onClineSettingsChange?: (value: RuntimeTaskClineSettings | undefined) => void;
 	agentOptions: Array<{ value: string; label: string }>;
@@ -266,6 +292,8 @@ export function TaskAgentModelPicker({
 	const clineProviderId = clineSettings?.providerId;
 	const clineModelId = clineSettings?.modelId;
 	const clineReasoningEffort = clineSettings?.reasoningEffort;
+	const copilotModelId = agentSettings?.modelId ?? "";
+	const copilotReasoningEffort = agentSettings?.reasoningEffort ?? "none";
 
 	const updateTaskClineSettings = useCallback(
 		(updater: (current: RuntimeTaskClineSettings | undefined) => RuntimeTaskClineSettings | undefined) => {
@@ -273,11 +301,18 @@ export function TaskAgentModelPicker({
 		},
 		[clineSettings, onClineSettingsChange],
 	);
+	const updateTaskAgentSettings = useCallback(
+		(updater: (current: RuntimeTaskAgentSettings | undefined) => RuntimeTaskAgentSettings | undefined) => {
+			onAgentSettingsChange?.(updater(cloneTaskAgentSettings(agentSettings)));
+		},
+		[agentSettings, onAgentSettingsChange],
+	);
 
 	// Show the Cline provider picker when the effective agent is "cline"
 	// (either explicitly overridden to cline, or defaulting to cline)
 	const effectiveAgentId = agentId ?? defaultAgentId ?? null;
 	const showClineProviderPicker = effectiveAgentId === "cline";
+	const showCopilotSettings = effectiveAgentId === "copilot";
 
 	// Show the Cline model picker when a provider is effectively selected
 	// (either explicitly overridden, or the global default provider is set)
@@ -288,6 +323,8 @@ export function TaskAgentModelPicker({
 	const [isSettingsExpanded, setIsSettingsExpanded] = useState(false);
 	const [isProviderPopoverOpen, setIsProviderPopoverOpen] = useState(false);
 	const [isModelPopoverOpen, setIsModelPopoverOpen] = useState(false);
+	const copilotModelInputId = useId();
+	const copilotReasoningSelectId = useId();
 	const [reasoningEffort, setReasoningEffort] = useState<RuntimeClineReasoningEffort | "">(
 		hasTaskClineSettingsOverride ? selectedTaskReasoningEffort : (defaultReasoningEffort ?? ""),
 	);
@@ -472,10 +509,15 @@ export function TaskAgentModelPicker({
 								value={agentId ?? ""}
 								onChange={(e) => {
 									const value = e.currentTarget.value;
-									onAgentIdChange(value ? (value as RuntimeAgentId) : undefined);
-									if (value !== "cline") {
+									const nextAgentId = value ? (value as RuntimeAgentId) : undefined;
+									const nextEffectiveAgentId = nextAgentId ?? defaultAgentId ?? null;
+									onAgentIdChange(nextAgentId);
+									if (nextEffectiveAgentId !== "cline") {
 										onClineSettingsChange?.(undefined);
 										setReasoningEffort("");
+									}
+									if (nextEffectiveAgentId !== "copilot") {
+										onAgentSettingsChange?.(undefined);
 									}
 								}}
 							>
@@ -597,6 +639,65 @@ export function TaskAgentModelPicker({
 										/>
 									</div>
 								) : null}
+							</div>
+						) : null}
+						{showCopilotSettings ? (
+							<div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+								<div className="min-w-0">
+									<label className="text-[11px] text-text-secondary block mb-1" htmlFor={copilotModelInputId}>
+										Model
+									</label>
+									<input
+										id={copilotModelInputId}
+										type="text"
+										value={copilotModelId}
+										onChange={(event) => {
+											const nextModelId = event.currentTarget.value;
+											updateTaskAgentSettings((currentSettings) => {
+												const nextSettings = cloneTaskAgentSettings(currentSettings) ?? {};
+												const trimmedModelId = nextModelId.trim();
+												if (trimmedModelId) {
+													nextSettings.modelId = trimmedModelId;
+												} else {
+													delete nextSettings.modelId;
+												}
+												return nextSettings.modelId || nextSettings.reasoningEffort
+													? nextSettings
+													: undefined;
+											});
+										}}
+										placeholder="Default"
+										className="h-8 w-full rounded-md border border-border bg-surface-2 px-2.5 text-[13px] text-text-primary placeholder:text-text-tertiary focus:border-border-focus focus:outline-none"
+									/>
+								</div>
+								<div className="min-w-0">
+									<label
+										className="text-[11px] text-text-secondary block mb-1"
+										htmlFor={copilotReasoningSelectId}
+									>
+										Reasoning effort
+									</label>
+									<NativeSelect
+										id={copilotReasoningSelectId}
+										size="sm"
+										fill
+										value={copilotReasoningEffort}
+										onChange={(event) => {
+											const nextReasoningEffort = event.currentTarget.value as RuntimeCopilotReasoningEffort;
+											updateTaskAgentSettings((currentSettings) => {
+												const nextSettings = cloneTaskAgentSettings(currentSettings) ?? {};
+												nextSettings.reasoningEffort = nextReasoningEffort;
+												return nextSettings;
+											});
+										}}
+									>
+										{COPILOT_REASONING_EFFORT_OPTIONS.map((option) => (
+											<option key={option.value} value={option.value}>
+												{option.label}
+											</option>
+										))}
+									</NativeSelect>
+								</div>
 							</div>
 						) : null}
 					</div>

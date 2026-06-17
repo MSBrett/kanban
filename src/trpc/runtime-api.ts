@@ -190,11 +190,11 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				//   2. body.agentId — the card's current per-task agent override.
 				//   3. scopedRuntimeConfig.selectedAgentId — the workspace-level default.
 				//
-				// clineSettings (which LLM model and reasoning profile the Cline agent uses):
+				// clineSettings / agentSettings:
 				//   Always taken from the card's current override object. There is no
-				//   session-level persistence for these;
-				//   if the user changes the model on the card, the next session launch
-				//   (including trash-restore) uses the updated values.
+				//   session-level persistence for these; if the user changes the model on
+				//   the card, the next session launch (including trash-restore) uses the
+				//   updated values.
 				const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
 				const previousTerminalAgentId = body.resumeFromTrash
 					? (terminalManager.getSummary(body.taskId)?.agentId ?? null)
@@ -287,6 +287,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					autonomousModeEnabled: scopedRuntimeConfig.agentAutonomousModeEnabled,
 					cwd: taskCwd,
 					prompt: body.prompt,
+					agentSettings: body.agentSettings,
 					images: body.images,
 					startInPlanMode: body.startInPlanMode,
 					resumeFromTrash: body.resumeFromTrash,

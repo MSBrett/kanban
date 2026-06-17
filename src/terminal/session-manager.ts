@@ -2,6 +2,7 @@
 // It owns process lifecycle, terminal protocol filtering, and summary updates
 // for command-driven agents such as Claude Code, Codex, Gemini, and shell sessions.
 import type {
+	RuntimeTaskAgentSettings,
 	RuntimeTaskHookActivity,
 	RuntimeTaskImage,
 	RuntimeTaskSessionReviewReason,
@@ -84,6 +85,7 @@ export interface StartTaskSessionRequest {
 	autonomousModeEnabled?: boolean;
 	cwd: string;
 	prompt: string;
+	agentSettings?: RuntimeTaskAgentSettings;
 	images?: RuntimeTaskImage[];
 	startInPlanMode?: boolean;
 	resumeFromTrash?: boolean;
@@ -151,6 +153,7 @@ function cloneStartTaskSessionRequest(request: StartTaskSessionRequest): StartTa
 	return {
 		...request,
 		args: [...request.args],
+		agentSettings: request.agentSettings ? { ...request.agentSettings } : undefined,
 		images: request.images ? request.images.map((image) => ({ ...image })) : undefined,
 		env: request.env ? { ...request.env } : undefined,
 	};
@@ -338,6 +341,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			autonomousModeEnabled: request.autonomousModeEnabled,
 			cwd: request.cwd,
 			prompt: request.prompt,
+			agentSettings: request.agentSettings,
 			images: request.images,
 			startInPlanMode: request.startInPlanMode,
 			resumeFromTrash: request.resumeFromTrash,
